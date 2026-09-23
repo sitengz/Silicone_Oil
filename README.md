@@ -6,6 +6,19 @@ PMPS oil, and coarse-grained PDMS-PMPS copolymer oils. It was split from the
 The generator and its configuration parser are self-contained; analyzers are
 not included yet.
 
+## Repository layout
+
+```text
+Generator/    oil generator and configuration parser
+Analysis/     reserved for analyzers
+simulations/  reserved for simulation cases
+examples/     reserved for worked examples
+model.conf    current editable generator configuration
+```
+
+The three reserved folders contain only short placeholders. Simulation cases,
+examples, and analyzer code will be added later.
+
 The generator writes four companion files for every case:
 
 ```text
@@ -27,7 +40,7 @@ From the repository root:
 
 ```bash
 g++ -std=c++14 -O2 -Wall -Wextra -Wpedantic \
-    oil_generator.cpp -o oil_generator
+    Generator/oil_generator.cpp -o Generator/oil_generator
 ```
 
 The code is compatible with C++14 and newer compilers. C++17 can also be used.
@@ -37,7 +50,7 @@ The code is compatible with C++14 and newer compilers. C++17 can also be used.
 Edit [`model.conf`](model.conf) and run:
 
 ```bash
-./oil_generator --config model.conf
+./Generator/oil_generator --config model.conf
 ```
 
 The file uses `key = value` lines. Blank lines and `#` comments are ignored;
@@ -46,7 +59,7 @@ keys may use underscores or hyphens (for example, `mps_percent` or
 including `output`. Command-line values override the same keys in the file:
 
 ```bash
-./oil_generator --config model.conf --chains 100
+./Generator/oil_generator --config model.conf --chains 100
 ```
 
 The included configuration describes 500 chains of 32 repeat units with 50%
@@ -58,7 +71,7 @@ generator is run. The existing command-line-only workflow remains available.
 Running without options:
 
 ```bash
-./oil_generator
+./Generator/oil_generator
 ```
 
 generates 625 PMPS oil chains with 16 MPS repeat units per chain:
@@ -234,7 +247,7 @@ Use `--mps-percent` to specify the percentage of repeat-unit positions that are
 MPS:
 
 ```bash
-./oil_generator \
+./Generator/oil_generator \
     --length 32 \
     --chains 500 \
     --mps-percent 25 \
@@ -249,7 +262,7 @@ Use `--mps-wt` to choose the closest integer MPS count per chain based on the
 different DMS and MPS repeat masses:
 
 ```bash
-./oil_generator \
+./Generator/oil_generator \
     --length 32 \
     --chains 500 \
     --mps-wt 40 \
@@ -283,20 +296,20 @@ Examples:
 
 ```bash
 # Pure PDMS oil
-./oil_generator --length 32 --chains 500 --mps-percent 0
+./Generator/oil_generator --length 32 --chains 500 --mps-percent 0
 
 # Pure PMPS oil
-./oil_generator --length 16 --chains 625 --mps-percent 100
+./Generator/oil_generator --length 16 --chains 625 --mps-percent 100
 
 # Approximately alternating 50:50 copolymer
-./oil_generator \
+./Generator/oil_generator \
     --length 32 \
     --chains 500 \
     --mps-percent 50 \
     --sequence alternating
 
 # Central PMPS block at a target MPS weight percentage
-./oil_generator \
+./Generator/oil_generator \
     --length 64 \
     --chains 250 \
     --mps-wt 30 \
