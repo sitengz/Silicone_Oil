@@ -40,16 +40,32 @@ monomer and weight percentages, type populations, topology counts, box size,
 random seeds, mixing-rule choice, and both simulation stages. During the runs,
 LAMMPS also writes separate bulk and film energy/pressure time series.
 
-## Compile
+## Build and generate
 
 From the repository root:
+
+```bash
+make
+make generate CONFIG=examples/pdms_n32/model.conf
+```
+
+`make` only compiles the generator; `make generate` creates the configured
+bulk-and-film case. The root `model.conf` is used when `CONFIG` is omitted.
+For a small trial run, use:
+
+```bash
+make generate CONFIG=examples/pdms_n32/model.conf GENERATOR_ARGS="--chains 40 --output simulations/data.pilot_pdms"
+```
+
+Run `make test` for the generator smoke tests. `make clean` removes only the
+compiled generator, not generated simulation cases. The generator requires
+C++17 for case-folder creation. If `make` is unavailable, the equivalent
+compile command is:
 
 ```bash
 g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic \
     Generator/oil_generator.cpp -o Generator/oil_generator
 ```
-
-The generator requires C++17 for case-folder creation.
 
 ## Configuration file
 
