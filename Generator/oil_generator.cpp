@@ -237,7 +237,7 @@ void print_help(const char* program) {
     std::cout
         << "Usage: " << program << " [options]\n\n"
         << "Standalone PDMS/PMPS silicone-oil generator.\n"
-        << "Each run writes a matched bulk system and a confined film system.\n"
+        << "Each run writes bulk data and a dependent film workflow.\n"
         << "One DMS repeat is one type-1 bead. One MPS repeat is a type-4\n"
         << "backbone bead with one type-5 pendant bead.\n\n"
         << "  --length N              repeat units per oil chain (default: 16)\n"
