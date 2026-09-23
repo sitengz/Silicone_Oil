@@ -266,8 +266,12 @@ dihedral_style nharmonic
 
 ## Composition controls
 
-Every chain has the same number of DMS and MPS repeat units. For `random`
-sequences, the positions vary between chains but the composition does not.
+The generator rounds the requested system-wide MPS count to the nearest whole
+repeat, then distributes it across chains. Every chain has either the lower
+or upper neighboring MPS count; which chains receive the extra repeat is
+shuffled reproducibly using `seed`. For `random` sequences, MPS positions
+within each chain are shuffled independently. The `.info` file records the
+actual system-wide composition and the number of chains at each composition.
 
 ### Monomer percentage
 
@@ -282,12 +286,15 @@ MPS:
     --sequence random
 ```
 
-This requests 8 MPS and 24 DMS repeat units per chain.
+This requests 8 MPS and 24 DMS repeat units per chain. When the requested
+percentage does not divide evenly across chains, the generator mixes the two
+neighboring per-chain counts to match the overall percentage within one
+repeat unit.
 
 ### Weight percentage
 
-Use `--mps-wt` to choose the closest integer MPS count per chain based on the
-different DMS and MPS repeat masses:
+Use `--mps-wt` to choose the closest overall MPS count based on the different
+DMS and MPS repeat masses:
 
 ```bash
 ./Generator/oil_generator \
@@ -305,8 +312,9 @@ M_chain = (N-k)*74.0 + k*136.2264
 MPS wt% = 100 * k*136.2264 / M_chain
 ```
 
-Because `k` must be an integer, the realized weight percentage can differ from
-the request. The generator reports both values and records them in `.info`.
+Because the total number of MPS repeats must be an integer, the realized
+weight percentage can differ slightly from the request. The generator reports
+both values and records them in `.info`.
 
 `--mps-percent` and `--mps-wt` cannot be supplied together.
 
@@ -314,7 +322,7 @@ the request. The generator reports both values and records them in `.info`.
 
 | Mode | Behavior |
 |---|---|
-| `random` | Selects the exact requested number of MPS sites randomly and reproducibly on each chain |
+| `random` | Selects each chain's allocated number of MPS sites randomly and reproducibly |
 | `alternating` | Distributes the MPS sites as evenly as possible along each chain |
 | `block` | Places one contiguous MPS block in the middle of each chain |
 

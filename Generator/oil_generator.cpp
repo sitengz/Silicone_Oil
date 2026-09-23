@@ -126,7 +126,10 @@ struct Settings {
     std::uint32_t velocity_seed = 492845u;
     std::string output;
     bool output_explicit = false;
-    int mps_per_chain = 0;
+    long long total_repeats = 0;
+    long long total_mps_repeats = 0;
+    int base_mps_per_chain = 0;
+    int chains_with_extra_mps = 0;
     std::string config_file;
 };
 
@@ -244,7 +247,7 @@ void print_help(const char* program) {
         << "  --chains M              number of oil chains (default: 625)\n"
         << "  --n N                    alias for --length\n"
         << "  --m M                    alias for --chains\n"
-        << "  --mps-percent X          MPS monomer percentage, 0-100 (default: 100)\n"
+        << "  --mps-percent X          overall MPS monomer percentage, 0-100 (default: 100)\n"
         << "  --mps-wt X               target MPS repeat-unit weight percentage, 0-100\n"
         << "                           (mutually exclusive with --mps-percent)\n"
         << "  --sequence MODE          random, alternating, or block (default: random)\n"
@@ -321,9 +324,12 @@ std::string filename_number(double value) {
 void resolve_composition(Settings& settings) {
     if (settings.length <= 0)
         throw std::runtime_error("--length must be positive");
+    if (settings.chains <= 0)
+        throw std::runtime_error("--chains must be positive");
     if (settings.mps_weight_percent >= 0.0 && settings.mps_percent_explicit)
         throw std::runtime_error("--mps-wt and --mps-percent are mutually exclusive");
 
+    settings.total_repeats = 1LL * settings.length * settings.chains;
     double requested_mps_count = 0.0;
     if (settings.mps_weight_percent >= 0.0) {
         if (settings.mps_weight_percent > 100.0)
@@ -332,17 +338,21 @@ void resolve_composition(Settings& settings) {
         const double denominator =
             kMpsRepeatMass * (1.0 - fraction) + fraction * kDmsMass;
         requested_mps_count =
-            denominator == 0.0 ? settings.length
-                               : fraction * settings.length * kDmsMass / denominator;
+            denominator == 0.0 ? settings.total_repeats
+                               : fraction * settings.total_repeats * kDmsMass / denominator;
     } else {
         if (settings.mps_monomer_percent < 0.0 ||
             settings.mps_monomer_percent > 100.0)
             throw std::runtime_error("--mps-percent must be between 0 and 100");
         requested_mps_count =
-            settings.length * settings.mps_monomer_percent / 100.0;
+            settings.total_repeats * settings.mps_monomer_percent / 100.0;
     }
-    settings.mps_per_chain = clamp_value(
-        static_cast<int>(std::lround(requested_mps_count)), 0, settings.length);
+    settings.total_mps_repeats = clamp_value(
+        std::llround(requested_mps_count), 0LL, settings.total_repeats);
+    settings.base_mps_per_chain = static_cast<int>(
+        settings.total_mps_repeats / settings.chains);
+    settings.chains_with_extra_mps = static_cast<int>(
+        settings.total_mps_repeats % settings.chains);
 }
 
 void validate(const Settings& settings) {
@@ -368,7 +378,7 @@ void validate(const Settings& settings) {
         throw std::runtime_error("--output cannot be empty");
 
     const long long maximum_atoms =
-        1LL * settings.chains * (settings.length + settings.mps_per_chain);
+        settings.total_repeats + settings.total_mps_repeats;
     if (maximum_atoms > std::numeric_limits<int>::max())
         throw std::runtime_error("The requested system exceeds 32-bit LAMMPS atom IDs");
 }
@@ -376,16 +386,16 @@ void validate(const Settings& settings) {
 void derive_output_name(Settings& settings) {
     if (settings.output_explicit) return;
     std::ostringstream name;
-    if (settings.mps_per_chain == 0) {
+    if (settings.total_mps_repeats == 0) {
         name << "data.Oil_PDMS";
-    } else if (settings.mps_per_chain == settings.length) {
+    } else if (settings.total_mps_repeats == settings.total_repeats) {
         name << "data.Oil_PMPS";
     } else {
         name << "data.Oil_Copolymer";
     }
     name << "_N" << settings.length << "_M" << settings.chains;
-    if (settings.mps_per_chain != 0 &&
-        settings.mps_per_chain != settings.length) {
+    if (settings.total_mps_repeats != 0 &&
+        settings.total_mps_repeats != settings.total_repeats) {
         if (settings.mps_weight_percent >= 0.0)
             name << "_MPS" << filename_number(settings.mps_weight_percent) << "wt";
         else
@@ -395,24 +405,23 @@ void derive_output_name(Settings& settings) {
     settings.output = name.str();
 }
 
-double chain_mass(const Settings& settings) {
-    return (settings.length - settings.mps_per_chain) * kDmsMass +
-           settings.mps_per_chain * kMpsRepeatMass;
+double total_mass(const Settings& settings) {
+    return (settings.total_repeats - settings.total_mps_repeats) * kDmsMass +
+           settings.total_mps_repeats * kMpsRepeatMass;
 }
 
 Box calculate_box(const Settings& settings) {
-    const double total_mass = settings.chains * chain_mass(settings);
-    const double volume = total_mass / (kAvogadroScale * settings.density);
+    const double volume = total_mass(settings) / (kAvogadroScale * settings.density);
     const double length = std::cbrt(volume);
     return {length, length, length};
 }
 
 std::vector<bool> make_sequence(
     const Settings& settings,
+    int count,
     std::mt19937& rng
 ) {
     std::vector<bool> is_mps(static_cast<std::size_t>(settings.length), false);
-    const int count = settings.mps_per_chain;
     if (count == 0) return is_mps;
     if (count == settings.length) {
         std::fill(is_mps.begin(), is_mps.end(), true);
@@ -946,12 +955,17 @@ System generate_system(
     const Box& box
 ) {
     System system;
-    const std::size_t expected_atoms =
-        static_cast<std::size_t>(settings.chains) *
-        static_cast<std::size_t>(settings.length + settings.mps_per_chain);
+    const std::size_t expected_atoms = static_cast<std::size_t>(
+        settings.total_repeats + settings.total_mps_repeats);
     system.atoms.reserve(expected_atoms);
 
     std::mt19937 rng(settings.seed);
+    std::vector<int> mps_counts(
+        static_cast<std::size_t>(settings.chains), settings.base_mps_per_chain);
+    for (int i = 0; i < settings.chains_with_extra_mps; ++i)
+        ++mps_counts[static_cast<std::size_t>(i)];
+    if (settings.chains_with_extra_mps > 0)
+        std::shuffle(mps_counts.begin(), mps_counts.end(), rng);
     PeriodicCellList cell_list(box, settings.minimum_separation, false);
     const int nx = static_cast<int>(std::ceil(std::cbrt(
         static_cast<double>(settings.chains) * box.lx / box.lz)));
@@ -965,7 +979,8 @@ System generate_system(
     std::uniform_real_distribution<double> jitter(-0.15, 0.15);
 
     for (int molecule_index = 0; molecule_index < settings.chains; ++molecule_index) {
-        const std::vector<bool> is_mps = make_sequence(settings, rng);
+        const std::vector<bool> is_mps = make_sequence(
+            settings, mps_counts[static_cast<std::size_t>(molecule_index)], rng);
         const int gx = molecule_index % nx;
         const int gy = (molecule_index / nx) % ny;
         const int gz = molecule_index / (nx * ny);
@@ -1666,10 +1681,11 @@ void write_info(
     const auto angles = interaction_type_counts(system.angles, 3);
     const auto dihedrals = interaction_type_counts(system.dihedrals, 4);
     const double realized_monomer_percent =
-        100.0 * settings.mps_per_chain / settings.length;
+        100.0 * settings.total_mps_repeats / settings.total_repeats;
     const double realized_weight_percent =
-        100.0 * settings.mps_per_chain * kMpsRepeatMass /
-        chain_mass(settings);
+        100.0 * settings.total_mps_repeats * kMpsRepeatMass /
+        total_mass(settings);
+    const bool uniform_composition = settings.chains_with_extra_mps == 0;
     const double compression_scale =
         std::cbrt(settings.density / settings.target_density);
     const PairParameters cold_wall = dms_pair_parameters(300.0);
@@ -1710,9 +1726,26 @@ void write_info(
         << "  \"composition\": {\n"
         << "    \"chain_length\": " << settings.length << ",\n"
         << "    \"chain_count\": " << settings.chains << ",\n"
-        << "    \"dms_repeats_per_chain\": "
-        << settings.length - settings.mps_per_chain << ",\n"
-        << "    \"mps_repeats_per_chain\": " << settings.mps_per_chain << ",\n"
+        << "    \"total_repeats\": " << settings.total_repeats << ",\n"
+        << "    \"dms_repeats_total\": "
+        << settings.total_repeats - settings.total_mps_repeats << ",\n"
+        << "    \"mps_repeats_total\": " << settings.total_mps_repeats << ",\n"
+        << "    \"dms_repeats_per_chain\": ";
+    if (uniform_composition)
+        out << settings.length - settings.base_mps_per_chain;
+    else out << "null";
+    out << ",\n"
+        << "    \"mps_repeats_per_chain\": ";
+    if (uniform_composition) out << settings.base_mps_per_chain;
+    else out << "null";
+    out << ",\n"
+        << "    \"chain_composition_distribution\": [{\"mps_repeats\": "
+        << settings.base_mps_per_chain << ", \"chains\": "
+        << settings.chains - settings.chains_with_extra_mps << "}";
+    if (!uniform_composition)
+        out << ", {\"mps_repeats\": " << settings.base_mps_per_chain + 1
+            << ", \"chains\": " << settings.chains_with_extra_mps << "}";
+    out << "],\n"
         << "    \"sequence\": \"" << settings.sequence << "\",\n"
         << "    \"requested_mps_monomer_percent\": ";
     if (settings.mps_weight_percent < 0.0)
@@ -1730,7 +1763,12 @@ void write_info(
         << realized_monomer_percent << ",\n"
         << "    \"realized_mps_weight_percent\": "
         << realized_weight_percent << ",\n"
-        << "    \"chain_mass_g_per_mol\": " << chain_mass(settings) << "\n"
+        << "    \"chain_mass_g_per_mol\": ";
+    if (uniform_composition) out << total_mass(settings) / settings.chains;
+    else out << "null";
+    out << ",\n"
+        << "    \"mean_chain_mass_g_per_mol\": "
+        << total_mass(settings) / settings.chains << "\n"
         << "  },\n"
         << "  \"atom_types\": {\n"
         << "    \"1\": {\"name\": \"neutral DMS\", \"mass\": "
@@ -1845,17 +1883,20 @@ void report(
     const Box& box
 ) {
     const double realized_monomer_percent =
-        100.0 * settings.mps_per_chain / settings.length;
+        100.0 * settings.total_mps_repeats / settings.total_repeats;
     const double realized_weight_percent =
-        100.0 * settings.mps_per_chain * kMpsRepeatMass /
-        chain_mass(settings);
+        100.0 * settings.total_mps_repeats * kMpsRepeatMass /
+        total_mass(settings);
     std::cerr << std::fixed << std::setprecision(4)
         << "Generated standalone silicone oil\n"
         << "  chains: " << settings.chains
         << ", repeat units/chain: " << settings.length << '\n'
-        << "  DMS/MPS per chain: "
-        << settings.length - settings.mps_per_chain << '/'
-        << settings.mps_per_chain << '\n'
+        << "  MPS repeats/chain: " << settings.base_mps_per_chain;
+    if (settings.chains_with_extra_mps > 0)
+        std::cerr << " or " << settings.base_mps_per_chain + 1
+                  << " (" << settings.chains_with_extra_mps
+                  << " chains with the extra MPS repeat)";
+    std::cerr << '\n'
         << "  realized MPS: " << realized_monomer_percent
         << " monomer%, " << realized_weight_percent << " wt%\n"
         << "  atoms/bonds/angles/dihedrals: "

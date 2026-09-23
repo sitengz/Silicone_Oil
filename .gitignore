@@ -7,4 +7,8 @@
 /gk_stress.*.dat
 /log.*
 /simulations/*/
+# Keep numbered formulation configs, but ignore generated simulation files.
+!/simulations/[0-9][0-9]/
+/simulations/[0-9][0-9]/*
+!/simulations/[0-9][0-9]/model.conf
 __pycache__/
