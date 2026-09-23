@@ -6,3 +6,5 @@
 /*.info
 /gk_stress.*.dat
 /log.*
+/simulations/*/
+__pycache__/
