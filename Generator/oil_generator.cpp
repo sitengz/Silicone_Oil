@@ -1393,7 +1393,7 @@ void write_input(
         << "undump          traj\n"
         << "reset_timestep  0 time 0.0\n"
         << "thermo          100000\n"
-        << "thermo_style    custom time pe pxx pyy pzz pxy pxz pyz lx ly lz\n"
+        << "thermo_style    custom time temp pe pxx pyy pzz pxy pxz pyz lx ly lz\n"
         << "thermo_modify   format float %.12g\n"
         << "variable        gk_time equal time\n"
         << "variable        gk_pxy equal pxy\n"

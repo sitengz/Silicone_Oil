@@ -73,6 +73,11 @@ class GeneratorWorkflowTest(unittest.TestCase):
                 film = (folder / ("in." + case + ".film")).read_text()
                 self.assertIn("boundary        p p p", bulk)
                 self.assertIn("write_data      data." + case + ".npt_eq", bulk)
+                self.assertIn(
+                    "thermo_style    custom time temp pe pxx pyy pzz pxy pxz pyz lx ly lz",
+                    bulk,
+                )
+                self.assertIn("variable        surface_temp equal temp", bulk)
                 self.assertIn("read_data       data." + case + ".npt_eq", film)
                 self.assertIn("reset_atoms     image all", film)
                 self.assertIn("boundary p p f", film)
