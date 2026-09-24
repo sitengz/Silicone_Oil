@@ -30,6 +30,7 @@ constexpr int kStressSampleEverySteps = 10;
 constexpr int kEnergySampleEverySteps = 1000;
 constexpr long long kFilmWallSteps = 100000;
 constexpr long long kFilmRelaxSteps = 1000000;
+constexpr long long kFilmProductionSteps = 5000000;
 
 constexpr double kDmsMass = 74.0;
 constexpr double kMpsBackboneMass = 59.1204;
@@ -1534,7 +1535,7 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
         << files.film_energy_basename
         << " screen no title \"# time_fs temp_K pe_kcal_per_mol pxx_atm pyy_atm "
            "pzz_atm lx_A ly_A lz_A\"\n"
-        << "run             " << kViscosityProductionSteps << "\n"
+        << "run             " << kFilmProductionSteps << "\n"
         << "unfix           energy_output\n"
         << "unfix           integrate\n"
         << "write_data      " << files.film_final_data_basename << " nocoeff\n";
@@ -1873,7 +1874,9 @@ void write_info(
         << "    \"temporary_wall_steps\": " << kFilmWallSteps << ",\n"
         << "    \"wall_free_relaxation_steps\": " << kFilmRelaxSteps << ",\n"
         << "    \"film_production_steps\": "
-        << kViscosityProductionSteps << ",\n"
+        << kFilmProductionSteps << ",\n"
+        << "    \"film_production_time_ns\": "
+        << kFilmProductionSteps * kTimestepFs / 1.0e6 << ",\n"
         << "    \"walls_during_production\": false\n"
         << "  }\n"
         << "}\n";

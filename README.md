@@ -386,7 +386,7 @@ bulk:  1M steps at 800 K → 1M isotropic compression → 1M relaxation
 film:  read data.<case>.npt_eq → expose two z surfaces
        → 100k steps at 300 K with temporary walls and lateral NPT
        → remove walls → 1M-step wall-free NVT relaxation
-       → 20M-step, 100 ns wall-free NVT production
+       → 5M-step, 25 ns wall-free NVT production
 ```
 
 The film starts at **300 K** from the equilibrated bulk snapshot; it does not
@@ -412,7 +412,10 @@ approaching the fixed z boundaries after wall removal; increase
 
 The high-temperature repulsive pair matrix is active only in bulk's first
 five million steps. Both 300 K production stages use the same attractive
-`lj/gromacs` matrix, 5 fs timestep, and NVT ensemble.
+`lj/gromacs` matrix, 5 fs timestep, and NVT ensemble. The film's shorter
+production samples its surface energy and pressure; it does not collect
+Green–Kubo stress data for viscosity. Check time-block averages for drift
+before treating 25 ns as sufficient sampling.
 
 ### Green-Kubo stress output
 
