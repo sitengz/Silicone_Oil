@@ -1470,9 +1470,13 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
         << "run             0\n"
         << "# Use the requested cutoff padding, enlarged only if an unwrapped\n"
         << "# chain would otherwise touch or cross a temporary wall.\n"
-        << "variable        needed_pad equal max(" << padding
-        << ",max(zlo-c_zu_min+" << repulsive_cutoff(wall)
-        << ",c_zu_max-zhi+" << repulsive_cutoff(wall) << "))\n"
+        << "# max(x,y) is not a scalar function in LAMMPS equal-style variables.\n"
+        << "variable        lower_pad equal zlo-c_zu_min+" << repulsive_cutoff(wall) << "\n"
+        << "variable        upper_pad equal c_zu_max-zhi+" << repulsive_cutoff(wall) << "\n"
+        << "variable        edge_pad equal "
+           "0.5*(v_lower_pad+v_upper_pad+abs(v_lower_pad-v_upper_pad))\n"
+        << "variable        needed_pad equal 0.5*(" << padding
+        << "+v_edge_pad+abs(" << padding << "-v_edge_pad))\n"
         << "variable        pad_used equal ${needed_pad}\n"
         << "print           \"Film z padding per face: ${pad_used} A\"\n"
         << "uncompute       zu_max\n"
