@@ -53,7 +53,7 @@ class GeneratorWorkflowTest(unittest.TestCase):
                         str(self.generator), "--config",
                         str(ROOT / "examples" / example / "model.conf"),
                         "--chains", "40", "--output",
-                        str(self.work / ("data." + case)),
+                        str(self.work / case / ("data." + case)),
                     ],
                     cwd=ROOT,
                     text=True,
@@ -68,22 +68,26 @@ class GeneratorWorkflowTest(unittest.TestCase):
                 )
                 self.assertEqual(info["composition"]["chain_length"], 32)
                 self.assertEqual(info["composition"]["chain_count"], 40)
-                self.assertEqual(info["simulation_template"]["green_kubo_production_steps"], 20000000)
-                self.assertEqual(info["film_from_bulk"]["film_production_steps"], 5000000)
-                self.assertEqual(info["film_from_bulk"]["film_production_time_ns"], 25)
+                self.assertEqual(info["simulation_template"]["equilibration_steps"], 11000000)
+                self.assertEqual(info["simulation_template"]["bulk_300K_npt_steps"], 5000000)
+                self.assertNotIn("green_kubo_production_steps", info["simulation_template"])
+                self.assertEqual(info["film_from_bulk"]["wall_free_relaxation_steps"], 10000000)
+                self.assertEqual(info["film_from_bulk"]["film_production_steps"], 10000000)
+                self.assertEqual(info["film_from_bulk"]["film_production_time_ns"], 50)
+                self.assertEqual(info["film_from_bulk"]["total_run_steps"], 20100000)
+                self.assertEqual(info["files"]["film_equilibration_output"],
+                                 "energy." + case + ".film_eq.dat")
+                self.assertNotIn("green_kubo_stress_output", info["files"])
                 self.assertTrue((folder / ("data." + case)).is_file())
                 bulk = (folder / ("in." + case)).read_text()
                 film = (folder / ("in." + case + ".film")).read_text()
                 self.assertIn("boundary        p p p", bulk)
                 self.assertIn("write_data      data." + case + ".npt_eq", bulk)
-                self.assertIn(
-                    "thermo_style    custom time temp pe pxx pyy pzz pxy pxz pyz lx ly lz",
-                    bulk,
-                )
-                self.assertIn("variable        surface_temp equal temp", bulk)
-                self.assertIn("run             20000000", bulk)
+                self.assertIn("run             5000000", bulk)
+                self.assertNotIn("gk_output", bulk)
+                self.assertNotIn("run             20000000", bulk)
                 self.assertIn("read_data       data." + case + ".npt_eq", film)
-                self.assertIn("run             5000000", film)
+                self.assertEqual(film.count("run             10000000"), 2)
                 self.assertNotIn("run             20000000", film)
                 self.assertIn("reset_atoms     image all", film)
                 self.assertIn("variable        lower_pad equal zlo-c_zu_min+", film)
@@ -96,6 +100,10 @@ class GeneratorWorkflowTest(unittest.TestCase):
                 self.assertIn("unfix           zhi_wall", film)
                 self.assertLess(
                     film.index("unfix           zhi_wall"),
+                    film.index("file energy." + case + ".film_eq.dat"),
+                )
+                self.assertLess(
+                    film.index("file energy." + case + ".film_eq.dat"),
                     film.index("file energy." + case + ".film.dat"),
                 )
                 self.assertNotIn("fix             xlink", bulk + film)
@@ -115,6 +123,21 @@ class GeneratorWorkflowTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--film-padding must be positive", result.stderr)
 
+    def test_config_output_is_adjacent_to_model_conf(self):
+        folder = self.work / "adjacent"
+        folder.mkdir()
+        config = folder / "model.conf"
+        config.write_text("length = 3\nchains = 2\nmps_percent = 0\noutput = data.adjacent\n")
+        result = subprocess.run(
+            [str(self.generator), "--config", str(config)],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((folder / "data.adjacent").is_file())
+        self.assertTrue((folder / "in.adjacent").is_file())
+        self.assertTrue((folder / "submit.adjacent.pair.sh").is_file())
+        self.assertFalse((folder / "adjacent").exists())
+
     def test_numbered_formulations_distribute_mps_across_chains(self):
         for case, length, percent, configured_chains in FORMULATIONS:
             with self.subTest(case=case):
@@ -128,14 +151,14 @@ class GeneratorWorkflowTest(unittest.TestCase):
                 self.assertEqual(int(settings["chains"]), configured_chains)
                 self.assertEqual(float(settings["mps_percent"]), percent)
                 self.assertEqual(settings["sequence"], "random")
-                self.assertEqual(settings["output"], f"simulations/data.{case}")
+                self.assertEqual(settings["output"], f"data.{case}")
 
                 trial_chains = 40
                 result = subprocess.run(
                     [
                         str(self.generator), "--config", str(config),
                         "--chains", str(trial_chains), "--output",
-                        str(self.work / ("data.form_" + case)),
+                        str(self.work / ("form_" + case) / ("data.form_" + case)),
                     ],
                     cwd=ROOT,
                     text=True,
@@ -184,7 +207,7 @@ class GeneratorWorkflowTest(unittest.TestCase):
             capture_output=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        info = json.loads((self.work / "weight_test/weight_test.info").read_text())
+        info = json.loads((self.work / "weight_test.info").read_text())
         composition = info["composition"]
         expected = math.floor(600 * 74.0 / (136.2264 + 74.0) + 0.5)
         self.assertEqual(composition["mps_repeats_total"], expected)

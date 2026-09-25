@@ -4,32 +4,31 @@ This repository contains a standalone generator for neutral PDMS oil, neutral
 PMPS oil, and coarse-grained PDMS-PMPS copolymer oils. It was split from the
 [`Oil` directory of Silicone_Coating](https://github.com/sitengz/Silicone_Coating/tree/main/Oil).
 The generator and its configuration parser are self-contained. `Analysis/`
-contains a single-chain ATSC4i tool; surface-tension analyzers are not
-included yet.
+contains single-chain ATSC4i and film pressure-anisotropy analyzers.
 
 ## Repository layout
 
 ```text
 Generator/    oil generator and configuration parser
-Analysis/     single-chain ATSC4i tool and documentation
-simulations/  numbered formulation configs and generated cases
-examples/     validation example configurations
+Analysis/     ATSC4i and surface-tension tools
+simulations/  numbered formulation configs and their generated files
+examples/     validation configs and their generated files
 model.conf    current editable generator configuration
 ```
 
-The three example configs are in `examples/`. Each generator run writes a
-case-named folder under the requested output directory, following the
-elastomer generator's layout:
+The three example configs are in `examples/`. Generated files are written
+beside the selected `model.conf`, without an additional case subdirectory:
 
 ```text
-simulations/<case>/
-├── data.<case>                 initial bulk data
-├── in.<case>                   bulk LAMMPS input
-├── in.<case>.film              dependent film LAMMPS input
-├── submit.<case>.sh            bulk Slurm job
-├── submit.<case>.film.sh       film Slurm job
-├── submit.<case>.pair.sh       submit both with afterok dependency
-└── <case>.info                 model and workflow metadata
+simulations/03/
+├── model.conf                  tracked formulation
+├── data.03                     initial bulk data
+├── in.03                       bulk LAMMPS input
+├── in.03.film                  dependent film LAMMPS input
+├── submit.03.sh                bulk Slurm job
+├── submit.03.film.sh           film Slurm job
+├── submit.03.pair.sh           submit both with afterok dependency
+└── 03.info                     model and workflow metadata
 ```
 
 Only bulk data exist at generation time. The film job reads the equilibrated
@@ -39,7 +38,8 @@ sequence, and topology rather than building a second random packing.
 The `.info` file is valid JSON and records the composition, realized MPS
 monomer and weight percentages, type populations, topology counts, box size,
 random seeds, mixing-rule choice, and both simulation stages. During the runs,
-LAMMPS also writes separate bulk and film energy/pressure time series.
+LAMMPS writes separate wall-free film equilibration and production pressure
+time series.
 
 ## Build and generate
 
@@ -55,12 +55,12 @@ bulk-and-film case. The root `model.conf` is used when `CONFIG` is omitted.
 For a small trial run, use:
 
 ```bash
-make generate CONFIG=examples/pdms_n32/model.conf GENERATOR_ARGS="--chains 40 --output simulations/data.pilot_pdms"
+make generate CONFIG=examples/pdms_n32/model.conf GENERATOR_ARGS="--chains 40 --output data.pilot_pdms"
 ```
 
 Run `make test` for the generator smoke tests. `make clean` removes only the
 compiled generator, not generated simulation cases. The generator requires
-C++17 for case-folder creation. If `make` is unavailable, the equivalent
+C++17. If `make` is unavailable, the equivalent
 compile command is:
 
 ```bash
@@ -90,9 +90,10 @@ including `output`. Command-line values override the same keys in the file:
 ```
 
 The included root configuration describes 500 chains of 32 repeat units with
-50% MPS. The config path and `output` path are resolved relative to the
-directory where the generator is run. Command-line-only usage remains
-available. Generating files does not submit jobs or run LAMMPS.
+50% MPS. With `--config`, a relative `output` path is resolved from the
+config file's directory. Without a config, it is resolved from the current
+working directory. Command-line-only usage remains available. Generating
+files does not submit jobs or run LAMMPS.
 
 ## Default model
 
@@ -106,14 +107,13 @@ generates a bulk case containing 625 PMPS oil chains with 16 MPS repeat units
 per chain, plus a film input that waits for the equilibrated bulk data:
 
 ```text
-Oil_PMPS_N16_M625/
-├── data.Oil_PMPS_N16_M625
-├── in.Oil_PMPS_N16_M625
-├── in.Oil_PMPS_N16_M625.film
-├── submit.Oil_PMPS_N16_M625.sh
-├── submit.Oil_PMPS_N16_M625.film.sh
-├── submit.Oil_PMPS_N16_M625.pair.sh
-└── Oil_PMPS_N16_M625.info
+./data.Oil_PMPS_N16_M625
+./in.Oil_PMPS_N16_M625
+./in.Oil_PMPS_N16_M625.film
+./submit.Oil_PMPS_N16_M625.sh
+./submit.Oil_PMPS_N16_M625.film.sh
+./submit.Oil_PMPS_N16_M625.pair.sh
+./Oil_PMPS_N16_M625.info
 ```
 
 The bulk contains 20,000 beads and reproduces the counts of the
@@ -374,7 +374,7 @@ Examples:
 | `--min-separation X` | positive number below 15 | 4.5 | Minimum intermolecular bead distance in Å |
 | `--seed N` | positive integer | 20260727 | Sequence, conformation, rotation, and packing seed |
 | `--velocity-seed N` | positive integer | 492845 | LAMMPS initial-velocity seed |
-| `--output FILE` | path | automatic | Name the initial data file; files go in a case-named subdirectory |
+| `--output FILE` | path | automatic | Name the initial data file; other files go beside it |
 | `--config FILE` | path | unset | Read settings from a `key = value` file |
 | `--help` | — | — | Print command help |
 
@@ -386,12 +386,11 @@ crosslinking:
 ```text
 bulk:  1M steps at 800 K → 1M isotropic compression → 1M relaxation
        → 2M more at 800 K → 1M cooling under isotropic NPT
-       → 1M at 300 K under isotropic NPT → write data.<case>.npt_eq
-       → 20M-step, 100 ns bulk NVT production
+       → 5M at 300 K under isotropic NPT → write data.<case>.npt_eq
 film:  read data.<case>.npt_eq → expose two z surfaces
        → 100k steps at 300 K with temporary walls and lateral NPT
-       → remove walls → 1M-step wall-free NVT relaxation
-       → 5M-step, 25 ns wall-free NVT production
+       → remove walls → 10M-step, 50 ns wall-free NVT equilibration
+       → 10M-step, 50 ns wall-free NVT pressure production
 ```
 
 The film starts at **300 K** from the equilibrated bulk snapshot; it does not
@@ -416,52 +415,44 @@ approaching the fixed z boundaries after wall removal; increase
 `film_padding` if needed.
 
 The high-temperature repulsive pair matrix is active only in bulk's first
-five million steps. Both 300 K production stages use the same attractive
-`lj/gromacs` matrix, 5 fs timestep, and NVT ensemble. The film's shorter
-production samples its surface energy and pressure; it does not collect
-Green–Kubo stress data for viscosity. Check time-block averages for drift
-before treating 25 ns as sufficient sampling.
+five million steps. At 300 K the attractive `lj/gromacs` matrix is used with
+a 5 fs timestep. Bulk ends after 11M steps (55 ns), with no viscosity run.
+Film takes another 20.1M steps (100.5 ns); the total planned workflow is
+31.1M steps (155.5 ns). These are initial budgets, not guaranteed
+equilibration times.
 
-### Green-Kubo stress output
+### Film pressure and surface tension
 
-After the final 300 K NPT equilibration, the barostat is removed and the final
-equilibrated volume is held fixed for a 100 ns NVT trajectory at 300 K. The
-production timestep counter and accumulated time are reset to zero.
-
-The atom-coordinate dump is stopped before this long production stage. Instead,
-LAMMPS writes the instantaneous off-diagonal pressure components every 10
-timesteps, corresponding to a 50 fs sampling interval:
+After temporary walls are removed, LAMMPS records pressure and box size every
+1000 steps in `energy.<case>.film_eq.dat` during wall-free equilibration and
+`energy.<case>.film.dat` during production. The columns are time, temperature,
+potential energy, `Pxx`, `Pyy`, `Pzz`, `Lx`, `Ly`, and `Lz`. Each phase resets
+the time counter to zero. The two-surface mechanical estimate is
 
 ```text
-gk_stress.<case>.dat
+gamma = (Lz / 2) * [Pzz - (Pxx + Pyy) / 2]
 ```
 
-The file has one header followed by exactly four columns:
+For `real` units, multiply `Lz` in Å times pressure in atm by `0.0101325`
+to obtain mN/m. Both pressure files contain only wall-free data. Analyze
+nonoverlapping time blocks rather than treating a drifting mean as converged:
 
-```text
-# time_fs pxy_atm pxz_atm pyz_atm
+```bash
+make surface-tension CONFIG=simulations/03/model.conf PHASE=equil BLOCK_NS=5
+make surface-tension CONFIG=simulations/03/model.conf PHASE=prod BLOCK_NS=5
 ```
 
-Thus a completed 100 ns run contains 2,000,000 stress samples. The pressure
-components are in atmospheres because the input uses LAMMPS `real` units. No
-time averaging is applied before writing, preserving the instantaneous stress
-series needed for Green-Kubo autocorrelation analysis.
-
-Both production stages also write `energy.<case>.bulk.dat` and
-`energy.<case>.film.dat` every 1000 steps. Columns are time, temperature,
-potential energy, diagonal pressures, and all three box lengths. The film
-file is recorded after walls are removed. A difference in mean potential
-energy divided by twice the film cross-sectional area is an energy-based
-surface excess, **not automatically the thermodynamic surface tension** at
-finite temperature. The recorded pressure components allow a separate
-  mechanical-route analysis later. No surface analyzer is included yet.
+The tool reports block and full-file means but does not automatically certify
+equilibration. If later blocks still drift, continue wall-free film NVT from
+the saved film state before reporting a final surface tension. Check that two
+free surfaces remain intact and atoms do not reach the nonperiodic z edges.
 
 Each generated Slurm job requests 48 hours. Confirm with shorter tests that
 the bulk and film runs each fit this limit; the 100k–200k-bead examples may
 need longer allocations or shorter pilot runs.
 
 The scripts use the same Nova module configuration as the V22/V35 generators.
-From the generated case folder, submit the ordered pair with:
+From the directory containing `model.conf`, submit the ordered pair with:
 
 ```bash
 bash submit.<case>.pair.sh
@@ -479,7 +470,7 @@ It does not:
 
 - generate a substrate-supported film;
 - create reactive oil end groups;
-- calculate surface tension automatically;
+- determine automatically when surface tension has converged;
 - infer any mixing rule other than the explicitly documented
   `0.579966 ×` geometric-epsilon, arithmetic-sigma DMS-MPS rule.
 
@@ -487,13 +478,13 @@ It does not:
 
 - `data.<case>` is the initial LAMMPS data file containing the box,
   oil atoms, and bonded topology.
-- `in.<case>` is the bulk equilibration and production input.
+- `in.<case>` is the bulk equilibration input through the 300 K NPT snapshot.
 - `in.<case>.film` reads the bulk equilibrated data at runtime and performs
-  film conversion, temporary-wall initiation, wall removal, and film production.
+  film conversion, temporary-wall initiation, wall-free equilibration, and
+  pressure production.
 - `submit.<case>.sh` and `submit.<case>.film.sh` are separate one-node, 96-task
   Slurm jobs; `submit.<case>.pair.sh` queues them in order.
 - `<case>.info` is a JSON manifest containing composition, sequence,
   force-field, topology, random-seed, and production settings.
-- `gk_stress.<case>.dat` is the bulk stress series for viscosity analysis.
-- `energy.<case>.bulk.dat` and `energy.<case>.film.dat` are production energy,
-  pressure, and box-size time series for future surface analysis.
+- `energy.<case>.film_eq.dat` and `energy.<case>.film.dat` are the wall-free
+  equilibration and production pressure/energy/box-size time series.

@@ -20,7 +20,7 @@ BACKBONE_TYPES = {1: "D", 4: "M"}
 
 
 def data_path_from_config(config_path: Path) -> tuple[Path, dict[str, str]]:
-    """Resolve the generator's case-folder layout from an explicit output key."""
+    """Resolve the data file next to the config from an explicit output key."""
     settings: dict[str, str] = {}
     for line_number, raw in enumerate(config_path.read_text().splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
@@ -38,7 +38,7 @@ def data_path_from_config(config_path: Path) -> tuple[Path, dict[str, str]]:
     case_name = requested.name.removeprefix("data.")
     if not case_name:
         raise ValueError(f"Cannot derive a case name from output = {requested}")
-    return requested.parent / case_name / requested.name, settings
+    return (requested if requested.is_absolute() else config_path.parent / requested), settings
 
 
 def sequence_from_data(data_path: Path, molecule_id: int) -> str:

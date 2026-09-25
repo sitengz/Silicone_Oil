@@ -10,8 +10,10 @@ SOURCES := Generator/oil_generator.cpp Generator/config_input.hpp
 CONFIG ?= model.conf
 GENERATOR_ARGS ?=
 MOLECULE ?= 1
+PHASE ?= prod
+BLOCK_NS ?= 5
 
-.PHONY: all generate atsc4i test clean
+.PHONY: all generate atsc4i surface-tension test clean
 
 all: $(GENERATOR)
 
@@ -23,6 +25,9 @@ generate: $(GENERATOR)
 
 atsc4i:
 	$(PYTHON) Analysis/atsc4i.py --config "$(CONFIG)" --molecule-id "$(MOLECULE)"
+
+surface-tension:
+	$(PYTHON) Analysis/surface_tension.py --config "$(CONFIG)" --phase "$(PHASE)" --block-ns "$(BLOCK_NS)"
 
 test:
 	$(PYTHON) -m unittest discover -s tests -v

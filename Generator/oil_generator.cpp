@@ -24,13 +24,12 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kAvogadroScale = 0.602214076;
 constexpr double kBoundaryClearance = 1.0e-4;
 constexpr double kTimestepFs = 5.0;
-constexpr long long kEquilibrationSteps = 7000000;
-constexpr long long kViscosityProductionSteps = 20000000;
-constexpr int kStressSampleEverySteps = 10;
+constexpr long long kBulkFinalNptSteps = 5000000;
+constexpr long long kEquilibrationSteps = 1000000 + 1000000 + 3000000 + 1000000 + kBulkFinalNptSteps;
 constexpr int kEnergySampleEverySteps = 1000;
 constexpr long long kFilmWallSteps = 100000;
-constexpr long long kFilmRelaxSteps = 1000000;
-constexpr long long kFilmProductionSteps = 5000000;
+constexpr long long kFilmRelaxSteps = 10000000;
+constexpr long long kFilmProductionSteps = 10000000;
 
 constexpr double kDmsMass = 74.0;
 constexpr double kMpsBackboneMass = 59.1204;
@@ -187,8 +186,7 @@ struct OutputFiles {
     std::string submit_basename;
     std::string info;
     std::string info_basename;
-    std::string stress_basename;
-    std::string bulk_energy_basename;
+    std::string film_equilibration_energy_basename;
     std::string film_energy_basename;
     std::string film_input;
     std::string film_input_basename;
@@ -259,7 +257,8 @@ void print_help(const char* program) {
         << "  --min-separation X       minimum intermolecular distance in A (default: 4.5)\n"
         << "  --seed N                 conformation/packing seed (default: 20260727)\n"
         << "  --velocity-seed N        LAMMPS velocity seed (default: 492845)\n"
-        << "  --output FILE            override the automatic data filename\n"
+        << "  --output FILE            name the initial data file; with --config,\n"
+        << "                           relative paths resolve beside the config\n"
         << "  --config FILE            read key = value settings; CLI values override file\n"
         << "  --help                   show this help\n";
 }
@@ -1120,7 +1119,8 @@ OutputFiles output_files(const Settings& settings) {
             : files.data_basename;
     if (files.case_name.empty() || files.case_name == "." || files.case_name == "..")
         throw std::runtime_error("Cannot derive a case name from --output");
-    const std::filesystem::path directory = requested.parent_path() / files.case_name;
+    const std::filesystem::path directory = requested.has_parent_path()
+        ? requested.parent_path() : std::filesystem::path(".");
     files.directory = directory.string();
     files.input_basename = "in." + files.case_name;
     files.submit_basename = "submit." + files.case_name + ".sh";
@@ -1128,8 +1128,8 @@ OutputFiles output_files(const Settings& settings) {
     files.film_submit_basename = "submit." + files.case_name + ".film.sh";
     files.pair_submit_basename = "submit." + files.case_name + ".pair.sh";
     files.info_basename = files.case_name + ".info";
-    files.stress_basename = "gk_stress." + files.case_name + ".dat";
-    files.bulk_energy_basename = "energy." + files.case_name + ".bulk.dat";
+    files.film_equilibration_energy_basename =
+        "energy." + files.case_name + ".film_eq.dat";
     files.film_energy_basename = "energy." + files.case_name + ".film.dat";
     files.bulk_equilibrated_data_basename = "data." + files.case_name + ".npt_eq";
     files.film_initial_data_basename = "data." + files.case_name + ".film_initial";
@@ -1385,45 +1385,10 @@ void write_input(
         << "# Final 300 K equilibration under isotropic NPT\n"
         << "fix             integrate all npt temp 300.0 300.0 50.0 "
         << "iso 1.0 1.0 500.0\n"
-        << "run             1000000\n"
+        << "run             " << kBulkFinalNptSteps << "\n"
         << "write_data      " << files.bulk_equilibrated_data_basename << " nocoeff\n"
-        << "unfix           integrate\n\n"
-        << "# Bulk NVT reference and 100 ns stress production at fixed volume\n"
-        << "# At 5 fs/step, 20,000,000 steps = 100,000,000 fs = 100 ns.\n"
-        << "# The dedicated stress file contains only time, pxy, pxz, and pyz.\n"
-        << "undump          traj\n"
-        << "reset_timestep  0 time 0.0\n"
-        << "thermo          100000\n"
-        << "thermo_style    custom time temp pe pxx pyy pzz pxy pxz pyz lx ly lz\n"
-        << "thermo_modify   format float %.12g\n"
-        << "variable        gk_time equal time\n"
-        << "variable        gk_pxy equal pxy\n"
-        << "variable        gk_pxz equal pxz\n"
-        << "variable        gk_pyz equal pyz\n"
-        << "variable        surface_temp equal temp\n"
-        << "variable        surface_pe equal pe\n"
-        << "variable        surface_pxx equal pxx\n"
-        << "variable        surface_pyy equal pyy\n"
-        << "variable        surface_pzz equal pzz\n"
-        << "variable        surface_lx equal lx\n"
-        << "variable        surface_ly equal ly\n"
-        << "variable        surface_lz equal lz\n"
-        << "fix             integrate all nvt temp 300.0 300.0 50.0\n"
-        << "fix             gk_output all print " << kStressSampleEverySteps
-        << " \"${gk_time} ${gk_pxy} ${gk_pxz} ${gk_pyz}\" "
-        << "file " << files.stress_basename
-        << " screen no title \"# time_fs pxy_atm pxz_atm pyz_atm\"\n"
-        << "fix             energy_output all print " << kEnergySampleEverySteps
-        << " \"${gk_time} ${surface_temp} ${surface_pe} ${surface_pxx} ${surface_pyy} "
-           "${surface_pzz} ${surface_lx} ${surface_ly} ${surface_lz}\" file "
-        << files.bulk_energy_basename
-        << " screen no title \"# time_fs temp_K pe_kcal_per_mol pxx_atm pyy_atm "
-           "pzz_atm lx_A ly_A lz_A\"\n"
-        << "run             " << kViscosityProductionSteps << "\n"
-        << "unfix           energy_output\n"
-        << "unfix           gk_output\n"
         << "unfix           integrate\n"
-        << "write_data      data." << files.case_name << ".nvt_gk_300K nocoeff\n";
+        << "undump          traj\n";
     if (!out) throw std::runtime_error("Failed while writing input file: " + files.input);
 }
 
@@ -1500,7 +1465,7 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
         << "timestep        " << kTimestepFs << "\n"
         << "thermo          1000\n"
         << "thermo_style    custom step temp pe density lx ly lz pxx pyy pzz\n"
-        << "dump            filmtraj all custom 100000 dump." << files.case_name
+        << "dump            filmtraj all custom 500000 dump." << files.case_name
         << ".film.lammpstrj id mol type x y z ix iy iz\n"
         << "dump_modify     filmtraj sort id\n"
         << "velocity        all create 300.0 " << settings.velocity_seed
@@ -1512,10 +1477,6 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
         << "unfix           zlo_wall\n"
         << "unfix           zhi_wall\n\n"
         << "# Free surfaces: no wall fix during relaxation or measurement.\n"
-        << "fix             integrate all nvt temp 300.0 300.0 50.0\n"
-        << "run             " << kFilmRelaxSteps << "\n"
-        << "write_data      " << files.film_equilibrated_data_basename << " nocoeff\n"
-        << "undump          filmtraj\n"
         << "reset_timestep  0 time 0.0\n"
         << "thermo          100000\n"
         << "thermo_style    custom time temp pe pxx pyy pzz lx ly lz\n"
@@ -1529,6 +1490,20 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
         << "variable        surface_lx equal lx\n"
         << "variable        surface_ly equal ly\n"
         << "variable        surface_lz equal lz\n"
+        << "fix             integrate all nvt temp 300.0 300.0 50.0\n"
+        << "fix             equil_output all print " << kEnergySampleEverySteps
+        << " \"${surface_time} ${surface_temp} ${surface_pe} ${surface_pxx} ${surface_pyy} "
+           "${surface_pzz} ${surface_lx} ${surface_ly} ${surface_lz}\" file "
+        << files.film_equilibration_energy_basename
+        << " screen no title \"# time_fs temp_K pe_kcal_per_mol pxx_atm pyy_atm "
+           "pzz_atm lx_A ly_A lz_A\"\n"
+        << "run             " << kFilmRelaxSteps << "\n"
+        << "unfix           equil_output\n"
+        << "unfix           integrate\n"
+        << "write_data      " << files.film_equilibrated_data_basename << " nocoeff\n"
+        << "undump          filmtraj\n"
+        << "reset_timestep  0 time 0.0\n"
+        << "fix             integrate all nvt temp 300.0 300.0 50.0\n"
         << "fix             energy_output all print " << kEnergySampleEverySteps
         << " \"${surface_time} ${surface_temp} ${surface_pe} ${surface_pxx} ${surface_pyy} "
            "${surface_pzz} ${surface_lx} ${surface_ly} ${surface_lz}\" file "
@@ -1713,13 +1688,11 @@ void write_info(
         << json_escape(files.pair_submit_basename) << "\",\n"
         << "    \"bulk_equilibrated_data\": \""
         << json_escape(files.bulk_equilibrated_data_basename) << "\",\n"
-        << "    \"bulk_energy_output\": \""
-        << json_escape(files.bulk_energy_basename) << "\",\n"
+        << "    \"film_equilibration_output\": \""
+        << json_escape(files.film_equilibration_energy_basename) << "\",\n"
         << "    \"film_energy_output\": \""
         << json_escape(files.film_energy_basename) << "\",\n"
-        << "    \"model_info\": \"" << json_escape(files.info_basename) << "\",\n"
-        << "    \"green_kubo_stress_output\": \""
-        << json_escape(files.stress_basename) << "\"\n"
+        << "    \"model_info\": \"" << json_escape(files.info_basename) << "\"\n"
         << "  },\n"
         << "  \"generator_input\": {\n"
         << "    \"config_file\": ";
@@ -1842,23 +1815,11 @@ void write_info(
         << "    \"final_temperature_K\": 300.0,\n"
         << "    \"timestep_fs\": " << kTimestepFs << ",\n"
         << "    \"equilibration_steps\": " << kEquilibrationSteps << ",\n"
-        << "    \"green_kubo_ensemble\": \"NVT\",\n"
-        << "    \"bulk_isotropic_green_kubo_interpretation\": true,\n"
-        << "    \"green_kubo_temperature_K\": 300.0,\n"
-        << "    \"green_kubo_production_steps\": "
-        << kViscosityProductionSteps << ",\n"
-        << "    \"green_kubo_production_time_ns\": "
-        << kViscosityProductionSteps * kTimestepFs / 1.0e6 << ",\n"
-        << "    \"stress_sample_every_steps\": "
-        << kStressSampleEverySteps << ",\n"
-        << "    \"stress_sample_interval_fs\": "
-        << kStressSampleEverySteps * kTimestepFs << ",\n"
-        << "    \"stress_columns\": [\"time_fs\", \"pxy_atm\", "
-           "\"pxz_atm\", \"pyz_atm\"],\n"
+        << "    \"bulk_300K_npt_steps\": " << kBulkFinalNptSteps << ",\n"
+        << "    \"surface_tension_method\": \"film pressure anisotropy\",\n"
         << "    \"energy_sample_every_steps\": "
         << kEnergySampleEverySteps << ",\n"
-        << "    \"total_run_steps\": "
-        << kEquilibrationSteps + kViscosityProductionSteps << "\n"
+        << "    \"total_run_steps\": " << kEquilibrationSteps << "\n"
         << "  },\n"
         << "  \"film_from_bulk\": {\n"
         << "    \"source_data\": \""
@@ -1873,10 +1834,14 @@ void write_info(
         << "    \"boundary_after_conversion\": \"p p f\",\n"
         << "    \"temporary_wall_steps\": " << kFilmWallSteps << ",\n"
         << "    \"wall_free_relaxation_steps\": " << kFilmRelaxSteps << ",\n"
+        << "    \"wall_free_relaxation_time_ns\": "
+        << kFilmRelaxSteps * kTimestepFs / 1.0e6 << ",\n"
         << "    \"film_production_steps\": "
         << kFilmProductionSteps << ",\n"
         << "    \"film_production_time_ns\": "
         << kFilmProductionSteps * kTimestepFs / 1.0e6 << ",\n"
+        << "    \"total_run_steps\": "
+        << kFilmWallSteps + kFilmRelaxSteps + kFilmProductionSteps << ",\n"
         << "    \"walls_during_production\": false\n"
         << "  }\n"
         << "}\n";
@@ -1915,10 +1880,14 @@ void report(
         << "  whole chains inside primary box: yes (image flags 0 0 0)\n"
         << "  scripted 800 K compression target: "
         << settings.target_density << " g/cm^3\n"
-        << "  bulk Green-Kubo production: 100 ns at 300 K NVT, stress every "
-        << kStressSampleEverySteps * kTimestepFs << " fs\n"
-        << "  film: derived after bulk 300 K NPT snapshot; temporary walls then free surfaces\n"
-        << "  generated case folder: " << files.directory << '\n'
+        << "  bulk: " << kEquilibrationSteps * kTimestepFs / 1.0e6
+        << " ns through 300 K NPT; no bulk production\n"
+        << "  film: " << kFilmWallSteps * kTimestepFs / 1.0e6
+        << " ns with walls, then " << kFilmRelaxSteps * kTimestepFs / 1.0e6
+        << " ns wall-free equilibration and "
+        << kFilmProductionSteps * kTimestepFs / 1.0e6
+        << " ns pressure production\n"
+        << "  generated files directory: " << files.directory << '\n'
         << "  submit both stages: bash " << files.pair_submit << '\n';
 }
 
@@ -1930,6 +1899,12 @@ int main(int argc, char** argv) {
         resolve_composition(settings);
         validate(settings);
         derive_output_name(settings);
+        if (!settings.config_file.empty() &&
+            std::filesystem::path(settings.output).is_relative()) {
+            settings.output =
+                (std::filesystem::path(settings.config_file).parent_path() /
+                 settings.output).lexically_normal().string();
+        }
 
         const Box box = calculate_box(settings);
         const System system = generate_system(settings, box);

@@ -63,9 +63,9 @@ Angles
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             config = root / "model.conf"
-            config.write_text(f"length = 15\noutput = {root}/data.07\n")
+            config.write_text("length = 15\noutput = data.07\n")
             path, settings = atsc4i.data_path_from_config(config)
-            self.assertEqual(path, root / "07/data.07")
+            self.assertEqual(path, root / "data.07")
             self.assertEqual(settings["length"], "15")
 
     @unittest.skipUnless(

@@ -11,8 +11,8 @@ make generate CONFIG=simulations/03/model.conf
 This writes bulk data, bulk and film inputs, and Slurm scripts into
 `simulations/03/`. Generation does not submit either job. The large generated
 files and runtime outputs are ignored by Git; each `model.conf` is tracked.
-The original validation examples remain in `examples/` and keep their own
-case names under `simulations/`.
+The original validation examples remain in `examples/` and generate beside
+their own config files.
 
 | Case | Formulation | Chain length | Chains | Total repeats |
 |---|---|---:|---:|---:|
