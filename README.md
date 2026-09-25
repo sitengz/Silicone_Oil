@@ -3,16 +3,17 @@
 This repository contains a standalone generator for neutral PDMS oil, neutral
 PMPS oil, and coarse-grained PDMS-PMPS copolymer oils. It was split from the
 [`Oil` directory of Silicone_Coating](https://github.com/sitengz/Silicone_Coating/tree/main/Oil).
-The generator and its configuration parser are self-contained; analyzers are
-not included yet.
+The generator and its configuration parser are self-contained. `Analysis/`
+contains a single-chain ATSC4i tool; surface-tension analyzers are not
+included yet.
 
 ## Repository layout
 
 ```text
 Generator/    oil generator and configuration parser
-Analysis/     reserved for analyzers
-simulations/  reserved for simulation cases
-examples/     reserved for worked examples
+Analysis/     single-chain ATSC4i tool and documentation
+simulations/  numbered formulation configs and generated cases
+examples/     validation example configurations
 model.conf    current editable generator configuration
 ```
 
@@ -66,6 +67,10 @@ compile command is:
 g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic \
     Generator/oil_generator.cpp -o Generator/oil_generator
 ```
+
+To calculate raw ATSC4i for one generated CG chain, see
+[`Analysis/README.md`](Analysis/README.md). After installing its Python
+dependencies, run `make atsc4i CONFIG=simulations/03/model.conf MOLECULE=1`.
 
 ## Configuration file
 
@@ -449,7 +454,7 @@ file is recorded after walls are removed. A difference in mean potential
 energy divided by twice the film cross-sectional area is an energy-based
 surface excess, **not automatically the thermodynamic surface tension** at
 finite temperature. The recorded pressure components allow a separate
-mechanical-route analysis later. No analyzer is included yet.
+  mechanical-route analysis later. No surface analyzer is included yet.
 
 Each generated Slurm job requests 48 hours. Confirm with shorter tests that
 the bulk and film runs each fit this limit; the 100k–200k-bead examples may
