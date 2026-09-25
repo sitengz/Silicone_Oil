@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -23,9 +24,12 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr double kAvogadroScale = 0.602214076;
 constexpr double kBoundaryClearance = 1.0e-4;
 constexpr double kTimestepFs = 5.0;
-constexpr long long kEquilibrationSteps = 7000000;
-constexpr long long kViscosityProductionSteps = 20000000;
-constexpr int kStressSampleEverySteps = 10;
+constexpr long long kBulkFinalNptSteps = 5000000;
+constexpr long long kEquilibrationSteps = 1000000 + 1000000 + 3000000 + 1000000 + kBulkFinalNptSteps;
+constexpr int kEnergySampleEverySteps = 1000;
+constexpr long long kFilmWallSteps = 100000;
+constexpr long long kFilmRelaxSteps = 10000000;
+constexpr long long kFilmProductionSteps = 10000000;
 
 constexpr double kDmsMass = 74.0;
 constexpr double kMpsBackboneMass = 59.1204;
@@ -116,12 +120,16 @@ struct Settings {
     std::string sequence = "random";
     double density = 0.1;
     double target_density = 0.8;
+    double film_padding = -1.0; // Negative selects the 300 K repulsive-wall cutoff.
     double minimum_separation = 4.5;
     std::uint32_t seed = 20260727u;
     std::uint32_t velocity_seed = 492845u;
     std::string output;
     bool output_explicit = false;
-    int mps_per_chain = 0;
+    long long total_repeats = 0;
+    long long total_mps_repeats = 0;
+    int base_mps_per_chain = 0;
+    int chains_with_extra_mps = 0;
     std::string config_file;
 };
 
@@ -156,7 +164,9 @@ struct System {
 };
 
 struct Box {
-    double length = 0.0;
+    double lx = 0.0;
+    double ly = 0.0;
+    double lz = 0.0;
 };
 
 struct PairParameters {
@@ -164,7 +174,10 @@ struct PairParameters {
     double sigma;
 };
 
+double maximum_repulsive_cutoff(double temperature);
+
 struct OutputFiles {
+    std::string directory;
     std::string data;
     std::string data_basename;
     std::string input;
@@ -173,7 +186,19 @@ struct OutputFiles {
     std::string submit_basename;
     std::string info;
     std::string info_basename;
-    std::string stress_basename;
+    std::string film_equilibration_energy_basename;
+    std::string film_energy_basename;
+    std::string film_input;
+    std::string film_input_basename;
+    std::string film_submit;
+    std::string film_submit_basename;
+    std::string pair_submit;
+    std::string pair_submit_basename;
+    std::string bulk_equilibrated_data_basename;
+    std::string film_initial_data_basename;
+    std::string film_equilibrated_data_basename;
+    std::string film_final_data_basename;
+    std::string unwrapped_dump_basename;
     std::string case_name;
 };
 
@@ -214,22 +239,26 @@ void print_help(const char* program) {
     std::cout
         << "Usage: " << program << " [options]\n\n"
         << "Standalone PDMS/PMPS silicone-oil generator.\n"
+        << "Each run writes bulk data and a dependent film workflow.\n"
         << "One DMS repeat is one type-1 bead. One MPS repeat is a type-4\n"
         << "backbone bead with one type-5 pendant bead.\n\n"
         << "  --length N              repeat units per oil chain (default: 16)\n"
         << "  --chains M              number of oil chains (default: 625)\n"
         << "  --n N                    alias for --length\n"
         << "  --m M                    alias for --chains\n"
-        << "  --mps-percent X          MPS monomer percentage, 0-100 (default: 100)\n"
+        << "  --mps-percent X          overall MPS monomer percentage, 0-100 (default: 100)\n"
         << "  --mps-wt X               target MPS repeat-unit weight percentage, 0-100\n"
         << "                           (mutually exclusive with --mps-percent)\n"
         << "  --sequence MODE          random, alternating, or block (default: random)\n"
         << "  --density X              initial mass density in g/cm^3 (default: 0.1)\n"
         << "  --target-density X       density after 800 K compression (default: 0.8)\n"
+        << "  --film-padding X         vacuum added at each z face in A\n"
+        << "                           (default: 300 K repulsive-wall cutoff)\n"
         << "  --min-separation X       minimum intermolecular distance in A (default: 4.5)\n"
         << "  --seed N                 conformation/packing seed (default: 20260727)\n"
         << "  --velocity-seed N        LAMMPS velocity seed (default: 492845)\n"
-        << "  --output FILE            override the automatic data filename\n"
+        << "  --output FILE            name the initial data file; with --config,\n"
+        << "                           relative paths resolve beside the config\n"
         << "  --config FILE            read key = value settings; CLI values override file\n"
         << "  --help                   show this help\n";
 }
@@ -251,6 +280,8 @@ void apply_option(Settings& settings, const std::string& option,
         settings.density = parse_double(value, option);
     else if (option == "--target-density")
         settings.target_density = parse_double(value, option);
+    else if (option == "--film-padding")
+        settings.film_padding = parse_double(value, option);
     else if (option == "--min-separation")
         settings.minimum_separation = parse_double(value, option);
     else if (option == "--seed") {
@@ -293,9 +324,12 @@ std::string filename_number(double value) {
 void resolve_composition(Settings& settings) {
     if (settings.length <= 0)
         throw std::runtime_error("--length must be positive");
+    if (settings.chains <= 0)
+        throw std::runtime_error("--chains must be positive");
     if (settings.mps_weight_percent >= 0.0 && settings.mps_percent_explicit)
         throw std::runtime_error("--mps-wt and --mps-percent are mutually exclusive");
 
+    settings.total_repeats = 1LL * settings.length * settings.chains;
     double requested_mps_count = 0.0;
     if (settings.mps_weight_percent >= 0.0) {
         if (settings.mps_weight_percent > 100.0)
@@ -304,17 +338,21 @@ void resolve_composition(Settings& settings) {
         const double denominator =
             kMpsRepeatMass * (1.0 - fraction) + fraction * kDmsMass;
         requested_mps_count =
-            denominator == 0.0 ? settings.length
-                               : fraction * settings.length * kDmsMass / denominator;
+            denominator == 0.0 ? settings.total_repeats
+                               : fraction * settings.total_repeats * kDmsMass / denominator;
     } else {
         if (settings.mps_monomer_percent < 0.0 ||
             settings.mps_monomer_percent > 100.0)
             throw std::runtime_error("--mps-percent must be between 0 and 100");
         requested_mps_count =
-            settings.length * settings.mps_monomer_percent / 100.0;
+            settings.total_repeats * settings.mps_monomer_percent / 100.0;
     }
-    settings.mps_per_chain = clamp_value(
-        static_cast<int>(std::lround(requested_mps_count)), 0, settings.length);
+    settings.total_mps_repeats = clamp_value(
+        std::llround(requested_mps_count), 0LL, settings.total_repeats);
+    settings.base_mps_per_chain = static_cast<int>(
+        settings.total_mps_repeats / settings.chains);
+    settings.chains_with_extra_mps = static_cast<int>(
+        settings.total_mps_repeats % settings.chains);
 }
 
 void validate(const Settings& settings) {
@@ -330,6 +368,8 @@ void validate(const Settings& settings) {
         throw std::runtime_error("--target-density must be positive");
     if (settings.target_density < settings.density)
         throw std::runtime_error("--target-density must be at least --density");
+    if (settings.film_padding != -1.0 && settings.film_padding <= 0.0)
+        throw std::runtime_error("--film-padding must be positive");
     if (settings.minimum_separation <= 0.0)
         throw std::runtime_error("--min-separation must be positive");
     if (settings.minimum_separation >= 15.0)
@@ -338,7 +378,7 @@ void validate(const Settings& settings) {
         throw std::runtime_error("--output cannot be empty");
 
     const long long maximum_atoms =
-        1LL * settings.chains * (settings.length + settings.mps_per_chain);
+        settings.total_repeats + settings.total_mps_repeats;
     if (maximum_atoms > std::numeric_limits<int>::max())
         throw std::runtime_error("The requested system exceeds 32-bit LAMMPS atom IDs");
 }
@@ -346,16 +386,16 @@ void validate(const Settings& settings) {
 void derive_output_name(Settings& settings) {
     if (settings.output_explicit) return;
     std::ostringstream name;
-    if (settings.mps_per_chain == 0) {
+    if (settings.total_mps_repeats == 0) {
         name << "data.Oil_PDMS";
-    } else if (settings.mps_per_chain == settings.length) {
+    } else if (settings.total_mps_repeats == settings.total_repeats) {
         name << "data.Oil_PMPS";
     } else {
         name << "data.Oil_Copolymer";
     }
     name << "_N" << settings.length << "_M" << settings.chains;
-    if (settings.mps_per_chain != 0 &&
-        settings.mps_per_chain != settings.length) {
+    if (settings.total_mps_repeats != 0 &&
+        settings.total_mps_repeats != settings.total_repeats) {
         if (settings.mps_weight_percent >= 0.0)
             name << "_MPS" << filename_number(settings.mps_weight_percent) << "wt";
         else
@@ -365,23 +405,23 @@ void derive_output_name(Settings& settings) {
     settings.output = name.str();
 }
 
-double chain_mass(const Settings& settings) {
-    return (settings.length - settings.mps_per_chain) * kDmsMass +
-           settings.mps_per_chain * kMpsRepeatMass;
+double total_mass(const Settings& settings) {
+    return (settings.total_repeats - settings.total_mps_repeats) * kDmsMass +
+           settings.total_mps_repeats * kMpsRepeatMass;
 }
 
 Box calculate_box(const Settings& settings) {
-    const double total_mass = settings.chains * chain_mass(settings);
-    const double volume = total_mass / (kAvogadroScale * settings.density);
-    return {std::cbrt(volume)};
+    const double volume = total_mass(settings) / (kAvogadroScale * settings.density);
+    const double length = std::cbrt(volume);
+    return {length, length, length};
 }
 
 std::vector<bool> make_sequence(
     const Settings& settings,
+    int count,
     std::mt19937& rng
 ) {
     std::vector<bool> is_mps(static_cast<std::size_t>(settings.length), false);
-    const int count = settings.mps_per_chain;
     if (count == 0) return is_mps;
     if (count == settings.length) {
         std::fill(is_mps.begin(), is_mps.end(), true);
@@ -695,20 +735,23 @@ Vec3 rotate(const std::array<double, 9>& matrix, const Vec3& v) {
     };
 }
 
-Vec3 minimum_image(Vec3 delta, double box_length) {
-    delta.x -= std::round(delta.x / box_length) * box_length;
-    delta.y -= std::round(delta.y / box_length) * box_length;
-    delta.z -= std::round(delta.z / box_length) * box_length;
+Vec3 minimum_image(Vec3 delta, const Box& box, bool film) {
+    delta.x -= std::round(delta.x / box.lx) * box.lx;
+    delta.y -= std::round(delta.y / box.ly) * box.ly;
+    if (!film) delta.z -= std::round(delta.z / box.lz) * box.lz;
     return delta;
 }
 
 class PeriodicCellList {
 public:
-    PeriodicCellList(double box_length, double cutoff)
-        : box_length_(box_length),
+    PeriodicCellList(const Box& box, double cutoff, bool film)
+        : box_(box), film_(film),
           cutoff2_(cutoff * cutoff),
-          cells_per_axis_(std::max(1, static_cast<int>(std::floor(box_length / cutoff)))),
-          cell_width_(box_length / cells_per_axis_) {}
+          cell_counts_{{std::max(1, static_cast<int>(std::floor(box.lx / cutoff))),
+                        std::max(1, static_cast<int>(std::floor(box.ly / cutoff))),
+                        std::max(1, static_cast<int>(std::floor(box.lz / cutoff))) }},
+          cell_widths_{{box.lx / cell_counts_[0], box.ly / cell_counts_[1],
+                        box.lz / cell_counts_[2]}} {}
 
     bool overlaps(const std::vector<Vec3>& positions) const {
         for (const Vec3& position : positions) {
@@ -716,14 +759,16 @@ public:
             for (int dx = -1; dx <= 1; ++dx) {
                 for (int dy = -1; dy <= 1; ++dy) {
                     for (int dz = -1; dz <= 1; ++dz) {
+                        const int z = cell[2] + dz;
+                        if (film_ && (z < 0 || z >= cell_counts_[2])) continue;
                         const long long key = cell_key(
-                            wrapped_index(cell[0] + dx),
-                            wrapped_index(cell[1] + dy),
-                            wrapped_index(cell[2] + dz));
+                            wrapped_index(cell[0] + dx, 0),
+                            wrapped_index(cell[1] + dy, 1),
+                            film_ ? z : wrapped_index(z, 2));
                         const auto found = cells_.find(key);
                         if (found == cells_.end()) continue;
                         for (const Vec3& existing : found->second) {
-                            if (norm2(minimum_image(position - existing, box_length_)) <
+                            if (norm2(minimum_image(position - existing, box_, film_)) <
                                 cutoff2_)
                                 return true;
                         }
@@ -743,30 +788,31 @@ public:
 
 private:
     std::array<int, 3> cell_coordinates(const Vec3& position) const {
-        const double half = 0.5 * box_length_;
-        auto index = [&](double value) {
-            int result = static_cast<int>(std::floor((value + half) / cell_width_));
-            if (result == cells_per_axis_) result = cells_per_axis_ - 1;
-            return clamp_value(result, 0, cells_per_axis_ - 1);
+        auto index = [&](double value, double length, int axis) {
+            int result = static_cast<int>(std::floor((value + 0.5 * length) /
+                                                     cell_widths_[axis]));
+            return clamp_value(result, 0, cell_counts_[axis] - 1);
         };
-        return {index(position.x), index(position.y), index(position.z)};
+        return {index(position.x, box_.lx, 0), index(position.y, box_.ly, 1),
+                index(position.z, box_.lz, 2)};
     }
 
-    int wrapped_index(int index) const {
-        index %= cells_per_axis_;
-        if (index < 0) index += cells_per_axis_;
+    int wrapped_index(int index, int axis) const {
+        index %= cell_counts_[axis];
+        if (index < 0) index += cell_counts_[axis];
         return index;
     }
 
     long long cell_key(int x, int y, int z) const {
-        return (static_cast<long long>(x) * cells_per_axis_ + y) *
-               cells_per_axis_ + z;
+        return (static_cast<long long>(x) * cell_counts_[1] + y) *
+               cell_counts_[2] + z;
     }
 
-    double box_length_;
+    Box box_;
+    bool film_;
     double cutoff2_;
-    int cells_per_axis_;
-    double cell_width_;
+    std::array<int, 3> cell_counts_;
+    std::array<double, 3> cell_widths_;
     std::unordered_map<long long, std::vector<Vec3>> cells_;
 };
 
@@ -909,33 +955,39 @@ System generate_system(
     const Box& box
 ) {
     System system;
-    const std::size_t expected_atoms =
-        static_cast<std::size_t>(settings.chains) *
-        static_cast<std::size_t>(settings.length + settings.mps_per_chain);
+    const std::size_t expected_atoms = static_cast<std::size_t>(
+        settings.total_repeats + settings.total_mps_repeats);
     system.atoms.reserve(expected_atoms);
 
     std::mt19937 rng(settings.seed);
-    PeriodicCellList cell_list(box.length, settings.minimum_separation);
-    const int nx = static_cast<int>(
-        std::ceil(std::cbrt(static_cast<double>(settings.chains))));
+    std::vector<int> mps_counts(
+        static_cast<std::size_t>(settings.chains), settings.base_mps_per_chain);
+    for (int i = 0; i < settings.chains_with_extra_mps; ++i)
+        ++mps_counts[static_cast<std::size_t>(i)];
+    if (settings.chains_with_extra_mps > 0)
+        std::shuffle(mps_counts.begin(), mps_counts.end(), rng);
+    PeriodicCellList cell_list(box, settings.minimum_separation, false);
+    const int nx = static_cast<int>(std::ceil(std::cbrt(
+        static_cast<double>(settings.chains) * box.lx / box.lz)));
     const int ny = nx;
     const int nz = (settings.chains + nx * ny - 1) / (nx * ny);
     const Vec3 cell_spacing = {
-        box.length / nx,
-        box.length / ny,
-        box.length / nz
+        box.lx / nx,
+        box.ly / ny,
+        box.lz / nz
     };
     std::uniform_real_distribution<double> jitter(-0.15, 0.15);
 
     for (int molecule_index = 0; molecule_index < settings.chains; ++molecule_index) {
-        const std::vector<bool> is_mps = make_sequence(settings, rng);
+        const std::vector<bool> is_mps = make_sequence(
+            settings, mps_counts[static_cast<std::size_t>(molecule_index)], rng);
         const int gx = molecule_index % nx;
         const int gy = (molecule_index / nx) % ny;
         const int gz = molecule_index / (nx * ny);
         const Vec3 base_anchor = {
-            -0.5 * box.length + (gx + 0.5) * cell_spacing.x,
-            -0.5 * box.length + (gy + 0.5) * cell_spacing.y,
-            -0.5 * box.length + (gz + 0.5) * cell_spacing.z
+            -0.5 * box.lx + (gx + 0.5) * cell_spacing.x,
+            -0.5 * box.ly + (gy + 0.5) * cell_spacing.y,
+            -0.5 * box.lz + (gz + 0.5) * cell_spacing.z
         };
 
         std::vector<Vec3> accepted_positions;
@@ -970,16 +1022,15 @@ System generate_system(
                 upper.z = std::max(upper.z, position.z);
             }
 
-            const double half = 0.5 * box.length;
             const Vec3 anchor_lower = {
-                -half + kBoundaryClearance - lower.x,
-                -half + kBoundaryClearance - lower.y,
-                -half + kBoundaryClearance - lower.z
+                -0.5 * box.lx + kBoundaryClearance - lower.x,
+                -0.5 * box.ly + kBoundaryClearance - lower.y,
+                -0.5 * box.lz + kBoundaryClearance - lower.z
             };
             const Vec3 anchor_upper = {
-                half - kBoundaryClearance - upper.x,
-                half - kBoundaryClearance - upper.y,
-                half - kBoundaryClearance - upper.z
+                0.5 * box.lx - kBoundaryClearance - upper.x,
+                0.5 * box.ly - kBoundaryClearance - upper.y,
+                0.5 * box.lz - kBoundaryClearance - upper.z
             };
             if (anchor_lower.x > anchor_upper.x ||
                 anchor_lower.y > anchor_upper.y ||
@@ -1008,7 +1059,7 @@ System generate_system(
         if (!accepted) {
             std::ostringstream message;
             message << "Could not place molecule " << molecule_index + 1
-                    << " wholly inside the box without overlap. Lower --density, "
+                    << " wholly inside the bulk box without overlap. Lower --density, "
                        "--min-separation, or --length.";
             throw std::runtime_error(message.str());
         }
@@ -1056,35 +1107,54 @@ System generate_system(
     return system;
 }
 
-std::string basename_of(const std::string& path) {
-    const std::size_t slash = path.find_last_of("/\\");
-    return slash == std::string::npos ? path : path.substr(slash + 1);
-}
-
-std::string directory_of(const std::string& path) {
-    const std::size_t slash = path.find_last_of("/\\");
-    return slash == std::string::npos ? "" : path.substr(0, slash + 1);
-}
-
 OutputFiles output_files(const Settings& settings) {
     OutputFiles files;
-    files.data = settings.output;
-    files.data_basename = basename_of(settings.output);
+    const std::filesystem::path requested(settings.output);
+    files.data_basename = requested.filename().string();
+    if (files.data_basename.empty())
+        throw std::runtime_error("Output filename cannot end with a separator");
     files.case_name =
         files.data_basename.rfind("data.", 0) == 0
             ? files.data_basename.substr(5)
             : files.data_basename;
-    if (files.case_name.empty())
+    if (files.case_name.empty() || files.case_name == "." || files.case_name == "..")
         throw std::runtime_error("Cannot derive a case name from --output");
-    const std::string directory = directory_of(settings.output);
+    const std::filesystem::path directory = requested.has_parent_path()
+        ? requested.parent_path() : std::filesystem::path(".");
+    files.directory = directory.string();
     files.input_basename = "in." + files.case_name;
     files.submit_basename = "submit." + files.case_name + ".sh";
+    files.film_input_basename = "in." + files.case_name + ".film";
+    files.film_submit_basename = "submit." + files.case_name + ".film.sh";
+    files.pair_submit_basename = "submit." + files.case_name + ".pair.sh";
     files.info_basename = files.case_name + ".info";
-    files.stress_basename = "gk_stress." + files.case_name + ".dat";
-    files.input = directory + files.input_basename;
-    files.submit = directory + files.submit_basename;
-    files.info = directory + files.info_basename;
+    files.film_equilibration_energy_basename =
+        "energy." + files.case_name + ".film_eq.dat";
+    files.film_energy_basename = "energy." + files.case_name + ".film.dat";
+    files.bulk_equilibrated_data_basename = "data." + files.case_name + ".npt_eq";
+    files.film_initial_data_basename = "data." + files.case_name + ".film_initial";
+    files.film_equilibrated_data_basename = "data." + files.case_name + ".film_eq";
+    files.film_final_data_basename = "data." + files.case_name + ".film_final";
+    files.unwrapped_dump_basename = "unwrap." + files.case_name + ".lammpstrj";
+    auto in_directory = [&](const std::string& basename) {
+        return (directory / basename).string();
+    };
+    files.data = in_directory(files.data_basename);
+    files.input = in_directory(files.input_basename);
+    files.submit = in_directory(files.submit_basename);
+    files.film_input = in_directory(files.film_input_basename);
+    files.film_submit = in_directory(files.film_submit_basename);
+    files.pair_submit = in_directory(files.pair_submit_basename);
+    files.info = in_directory(files.info_basename);
     return files;
+}
+
+void create_output_directory(const OutputFiles& files) {
+    std::error_code error;
+    std::filesystem::create_directories(files.directory, error);
+    if (error)
+        throw std::runtime_error("Cannot create output directory " + files.directory +
+                                 ": " + error.message());
 }
 
 void write_data(
@@ -1104,9 +1174,9 @@ void write_data(
         << system.dihedrals.size() << " dihedrals\n"
         << "4 dihedral types\n\n"
         << std::fixed << std::setprecision(8)
-        << -0.5 * box.length << ' ' << 0.5 * box.length << " xlo xhi\n"
-        << -0.5 * box.length << ' ' << 0.5 * box.length << " ylo yhi\n"
-        << -0.5 * box.length << ' ' << 0.5 * box.length << " zlo zhi\n\n"
+        << -0.5 * box.lx << ' ' << 0.5 * box.lx << " xlo xhi\n"
+        << -0.5 * box.ly << ' ' << 0.5 * box.ly << " ylo yhi\n"
+        << -0.5 * box.lz << ' ' << 0.5 * box.lz << " zlo zhi\n\n"
         << "Masses\n\n"
         << "1 " << kDmsMass << "\n"
         << "2 " << kDmsMass << "\n"
@@ -1236,7 +1306,8 @@ void write_input(
         maximum_repulsive_cutoff(hot_temperature);
 
     out << "# Generated by the standalone silicone-oil generator\n"
-        << "# Types 1-3: DMS namespace; type 4: MPS backbone; type 5: MPS pendant\n\n"
+        << "# Types 1-3: DMS namespace; type 4: MPS backbone; type 5: MPS pendant\n"
+        << "# Bulk stage; the dependent film job reads the 300 K NPT snapshot.\n\n"
         << "units           real\n"
         << "boundary        p p p\n"
         << "atom_style      full\n"
@@ -1314,31 +1385,137 @@ void write_input(
         << "# Final 300 K equilibration under isotropic NPT\n"
         << "fix             integrate all npt temp 300.0 300.0 50.0 "
         << "iso 1.0 1.0 500.0\n"
-        << "run             1000000\n"
-        << "write_data      data." << files.case_name << ".npt_eq nocoeff\n"
-        << "unfix           integrate\n\n"
-        << "# 100 ns Green-Kubo production at 300 K and fixed volume\n"
-        << "# At 5 fs/step, 20,000,000 steps = 100,000,000 fs = 100 ns.\n"
-        << "# The dedicated stress file contains only time, pxy, pxz, and pyz.\n"
-        << "undump          traj\n"
+        << "run             " << kBulkFinalNptSteps << "\n"
+        << "write_data      " << files.bulk_equilibrated_data_basename << " nocoeff\n"
+        << "unfix           integrate\n"
+        << "undump          traj\n";
+    if (!out) throw std::runtime_error("Failed while writing input file: " + files.input);
+}
+
+void write_film_input(const Settings& settings, const OutputFiles& files) {
+    std::ofstream out(files.film_input);
+    if (!out)
+        throw std::runtime_error("Cannot open film input file: " + files.film_input);
+    const PairParameters wall = dms_pair_parameters(300.0);
+    const double padding = settings.film_padding > 0.0
+        ? settings.film_padding : repulsive_cutoff(wall);
+
+    out << std::fixed << std::setprecision(9)
+        << "# Derived film: read the equilibrated bulk, preserve its topology and x/y box.\n"
+        << "# Material slab thickness starts near bulk Lz; cell Lz grows by 2*padding.\n"
+        << "units           real\n"
+        << "boundary        p p p\n"
+        << "atom_style      full\n"
+        << "bond_style      harmonic\n"
+        << "angle_style     hybrid harmonic quartic\n"
+        << "dihedral_style  nharmonic\n"
+        << "special_bonds   lj 0 0 0.5\n"
+        << "pair_style      lj/gromacs 12 15\n"
+        << "comm_modify     cutoff 15\n"
+        << "neighbor        2.5 bin\n"
+        << "neigh_modify    delay 5 every 1\n"
+        << "read_data       " << files.bulk_equilibrated_data_basename << "\n\n"
+        << "bond_coeff      1 115.4086 2.801\n"
+        << "bond_coeff      2 108.3835 2.8039\n"
+        << "bond_coeff      3 232.8302 3.12497\n"
+        << "angle_coeff     1 harmonic 64.62431 111.623\n"
+        << "angle_coeff     2 quartic 110.566 64.3974 -139.5241 80.974\n"
+        << "angle_coeff     3 quartic 110.746 -20.8906 23.3707 180.3228\n"
+        << "dihedral_coeff  1 4 3.280141429 -0.59019769 1.991530534 3.31026047\n"
+        << "dihedral_coeff  2 8 1.3730 0.2686 0.4017 -1.7250 -0.7052 4.1390 0.2327 -2.2635\n"
+        << "dihedral_coeff  3 8 2.3494 -1.5840 -1.6463 3.2133 4.1479 -2.8795 -2.2665 1.1811\n"
+        << "dihedral_coeff  4 8 2.23125 0.24735 2.4327 -2.8832 -4.7124 7.17825 2.33495 -3.74\n";
+    write_pair_matrix(out, 300.0, false);
+    out << "\n"
+        << "# Keep bonded molecules intact while changing z from periodic to fixed.\n"
+        << "# This follows the LAMMPS bulk-to-slab reset/image + unwrapped-dump method.\n"
+        << "reset_atoms     image all\n"
+        << "compute         zu_atom all property/atom zu\n"
+        << "compute         zu_min all reduce min c_zu_atom\n"
+        << "compute         zu_max all reduce max c_zu_atom\n"
+        << "run             0\n"
+        << "# Use the requested cutoff padding, enlarged only if an unwrapped\n"
+        << "# chain would otherwise touch or cross a temporary wall.\n"
+        << "# max(x,y) is not a scalar function in LAMMPS equal-style variables.\n"
+        << "variable        lower_pad equal zlo-c_zu_min+" << repulsive_cutoff(wall) << "\n"
+        << "variable        upper_pad equal c_zu_max-zhi+" << repulsive_cutoff(wall) << "\n"
+        << "variable        edge_pad equal "
+           "0.5*(v_lower_pad+v_upper_pad+abs(v_lower_pad-v_upper_pad))\n"
+        << "variable        needed_pad equal 0.5*(" << padding
+        << "+v_edge_pad+abs(" << padding << "-v_edge_pad))\n"
+        << "variable        pad_used equal ${needed_pad}\n"
+        << "print           \"Film z padding per face: ${pad_used} A\"\n"
+        << "uncompute       zu_max\n"
+        << "uncompute       zu_min\n"
+        << "uncompute       zu_atom\n"
+        << "write_dump      all custom " << files.unwrapped_dump_basename
+        << " id xu yu zu\n"
+        << "change_box      all z delta -${pad_used} ${pad_used}"
+        << " boundary p p f units box\n"
+        << "read_dump       " << files.unwrapped_dump_basename
+        << " 0 x y z box no replace yes\n"
+        << "write_data      " << files.film_initial_data_basename << " nocoeff\n\n"
+        << "# Temporary z walls stabilize the newly exposed surfaces.\n"
+        << "fix             zlo_wall all wall/lj126 zlo EDGE "
+        << wall.epsilon << ' ' << wall.sigma << ' '
+        << repulsive_cutoff(wall) << " units box\n"
+        << "fix             zhi_wall all wall/lj126 zhi EDGE "
+        << wall.epsilon << ' ' << wall.sigma << ' '
+        << repulsive_cutoff(wall) << " units box\n"
+        << "timestep        " << kTimestepFs << "\n"
+        << "thermo          1000\n"
+        << "thermo_style    custom step temp pe density lx ly lz pxx pyy pzz\n"
+        << "dump            filmtraj all custom 500000 dump." << files.case_name
+        << ".film.lammpstrj id mol type x y z ix iy iz\n"
+        << "dump_modify     filmtraj sort id\n"
+        << "velocity        all create 300.0 " << settings.velocity_seed
+        << " mom yes rot yes dist gaussian\n"
+        << "fix             integrate all npt temp 300.0 300.0 50.0 "
+           "x 1.0 1.0 500.0 y 1.0 1.0 500.0 couple xy\n"
+        << "run             " << kFilmWallSteps << "\n"
+        << "unfix           integrate\n"
+        << "unfix           zlo_wall\n"
+        << "unfix           zhi_wall\n\n"
+        << "# Free surfaces: no wall fix during relaxation or measurement.\n"
         << "reset_timestep  0 time 0.0\n"
         << "thermo          100000\n"
-        << "thermo_style    custom time pxy pxz pyz\n"
+        << "thermo_style    custom time temp pe pxx pyy pzz lx ly lz\n"
         << "thermo_modify   format float %.12g\n"
-        << "variable        gk_time equal time\n"
-        << "variable        gk_pxy equal pxy\n"
-        << "variable        gk_pxz equal pxz\n"
-        << "variable        gk_pyz equal pyz\n"
+        << "variable        surface_time equal time\n"
+        << "variable        surface_temp equal temp\n"
+        << "variable        surface_pe equal pe\n"
+        << "variable        surface_pxx equal pxx\n"
+        << "variable        surface_pyy equal pyy\n"
+        << "variable        surface_pzz equal pzz\n"
+        << "variable        surface_lx equal lx\n"
+        << "variable        surface_ly equal ly\n"
+        << "variable        surface_lz equal lz\n"
         << "fix             integrate all nvt temp 300.0 300.0 50.0\n"
-        << "fix             gk_output all print " << kStressSampleEverySteps
-        << " \"${gk_time} ${gk_pxy} ${gk_pxz} ${gk_pyz}\" "
-        << "file " << files.stress_basename
-        << " screen no title \"# time_fs pxy_atm pxz_atm pyz_atm\"\n"
-        << "run             " << kViscosityProductionSteps << "\n"
-        << "unfix           gk_output\n"
+        << "fix             equil_output all print " << kEnergySampleEverySteps
+        << " \"${surface_time} ${surface_temp} ${surface_pe} ${surface_pxx} ${surface_pyy} "
+           "${surface_pzz} ${surface_lx} ${surface_ly} ${surface_lz}\" file "
+        << files.film_equilibration_energy_basename
+        << " screen no title \"# time_fs temp_K pe_kcal_per_mol pxx_atm pyy_atm "
+           "pzz_atm lx_A ly_A lz_A\"\n"
+        << "run             " << kFilmRelaxSteps << "\n"
+        << "unfix           equil_output\n"
         << "unfix           integrate\n"
-        << "write_data      data." << files.case_name << ".nvt_gk_300K nocoeff\n";
-    if (!out) throw std::runtime_error("Failed while writing input file: " + files.input);
+        << "write_data      " << files.film_equilibrated_data_basename << " nocoeff\n"
+        << "undump          filmtraj\n"
+        << "reset_timestep  0 time 0.0\n"
+        << "fix             integrate all nvt temp 300.0 300.0 50.0\n"
+        << "fix             energy_output all print " << kEnergySampleEverySteps
+        << " \"${surface_time} ${surface_temp} ${surface_pe} ${surface_pxx} ${surface_pyy} "
+           "${surface_pzz} ${surface_lx} ${surface_ly} ${surface_lz}\" file "
+        << files.film_energy_basename
+        << " screen no title \"# time_fs temp_K pe_kcal_per_mol pxx_atm pyy_atm "
+           "pzz_atm lx_A ly_A lz_A\"\n"
+        << "run             " << kFilmProductionSteps << "\n"
+        << "unfix           energy_output\n"
+        << "unfix           integrate\n"
+        << "write_data      " << files.film_final_data_basename << " nocoeff\n";
+    if (!out)
+        throw std::runtime_error("Failed while writing film input file: " + files.film_input);
 }
 
 std::string sanitize_job_name(std::string name) {
@@ -1354,11 +1531,23 @@ std::string sanitize_job_name(std::string name) {
     return name;
 }
 
-void write_submit(const OutputFiles& files) {
-    std::ofstream out(files.submit);
-    if (!out) throw std::runtime_error("Cannot open Slurm file: " + files.submit);
+std::string shell_quote(const std::string& value) {
+    std::string quoted = "'";
+    for (char character : value) {
+        if (character == '\'') quoted += "'\\''";
+        else quoted.push_back(character);
+    }
+    return quoted + "'";
+}
+
+void write_submit_file(const std::string& path, const std::string& job_name,
+                       const std::string& input_basename,
+                       const std::string& output_basename,
+                       const std::string& required_data = "") {
+    std::ofstream out(path);
+    if (!out) throw std::runtime_error("Cannot open Slurm file: " + path);
     out << "#!/bin/bash\n"
-        << "#SBATCH --job-name=" << sanitize_job_name(files.case_name) << "\n"
+        << "#SBATCH --job-name=" << sanitize_job_name(job_name) << "\n"
         << "#SBATCH --time=48:00:00\n"
         << "#SBATCH --nodes=1\n"
         << "#SBATCH --ntasks-per-node=96\n"
@@ -1375,10 +1564,38 @@ void write_submit(const OutputFiles& files) {
         << "module load mpi/2021.7.1\n"
         << "module load lammps/20230802.2-py310-openmpi4-ezoqd7f\n\n"
         << "export OMP_NUM_THREADS=1\n\n"
-        << "INPUT='" << files.input_basename << "'\n"
-        << "OUTPUT='out." << files.case_name << "'\n\n"
-        << "srun lmp -in \"$INPUT\" > \"$OUTPUT\"\n";
-    if (!out) throw std::runtime_error("Failed while writing Slurm file: " + files.submit);
+        << "INPUT=" << shell_quote(input_basename) << "\n"
+        << "OUTPUT=" << shell_quote(output_basename) << "\n\n";
+    if (!required_data.empty())
+        out << "if [[ ! -s " << shell_quote(required_data) << " ]]; then\n"
+            << "  echo 'Missing equilibrated bulk data; run the bulk job first.' >&2\n"
+            << "  exit 1\n"
+            << "fi\n\n";
+    out << "srun lmp -in \"$INPUT\" > \"$OUTPUT\"\n";
+    if (!out) throw std::runtime_error("Failed while writing Slurm file: " + path);
+}
+
+void write_submit(const OutputFiles& files) {
+    write_submit_file(files.submit, files.case_name + "_bulk",
+                      files.input_basename, "out." + files.case_name + ".bulk");
+    write_submit_file(files.film_submit, files.case_name + "_film",
+                      files.film_input_basename, "out." + files.case_name + ".film",
+                      files.bulk_equilibrated_data_basename);
+    std::ofstream out(files.pair_submit);
+    if (!out)
+        throw std::runtime_error("Cannot open pair submit script: " + files.pair_submit);
+    out << "#!/bin/bash\n"
+        << "set -euo pipefail\n"
+        << "cd -- \"$(dirname -- \"${BASH_SOURCE[0]}\")\"\n"
+        << "bulk_job_id=$(sbatch --parsable " << shell_quote(files.submit_basename)
+        << ")\n"
+        << "bulk_job_id=${bulk_job_id%%;*}\n"
+        << "film_job_id=$(sbatch --parsable --dependency=afterok:\"$bulk_job_id\" "
+        << shell_quote(files.film_submit_basename) << ")\n"
+        << "printf 'Bulk job: %s\\nFilm job: %s\\n' \"$bulk_job_id\" \"$film_job_id\"\n";
+    if (!out)
+        throw std::runtime_error("Failed while writing pair submit script: " +
+                                 files.pair_submit);
 }
 
 std::array<long long, 6> atom_type_counts(const System& system) {
@@ -1444,12 +1661,16 @@ void write_info(
     const auto angles = interaction_type_counts(system.angles, 3);
     const auto dihedrals = interaction_type_counts(system.dihedrals, 4);
     const double realized_monomer_percent =
-        100.0 * settings.mps_per_chain / settings.length;
+        100.0 * settings.total_mps_repeats / settings.total_repeats;
     const double realized_weight_percent =
-        100.0 * settings.mps_per_chain * kMpsRepeatMass /
-        chain_mass(settings);
+        100.0 * settings.total_mps_repeats * kMpsRepeatMass /
+        total_mass(settings);
+    const bool uniform_composition = settings.chains_with_extra_mps == 0;
     const double compression_scale =
         std::cbrt(settings.density / settings.target_density);
+    const PairParameters cold_wall = dms_pair_parameters(300.0);
+    const double padding = settings.film_padding > 0.0
+        ? settings.film_padding : repulsive_cutoff(cold_wall);
 
     out << std::fixed << std::setprecision(8)
         << "{\n"
@@ -1459,9 +1680,19 @@ void write_info(
         << "    \"data\": \"" << json_escape(files.data_basename) << "\",\n"
         << "    \"lammps_input\": \"" << json_escape(files.input_basename) << "\",\n"
         << "    \"slurm_submit\": \"" << json_escape(files.submit_basename) << "\",\n"
-        << "    \"model_info\": \"" << json_escape(files.info_basename) << "\",\n"
-        << "    \"green_kubo_stress_output\": \""
-        << json_escape(files.stress_basename) << "\"\n"
+        << "    \"film_lammps_input\": \""
+        << json_escape(files.film_input_basename) << "\",\n"
+        << "    \"film_slurm_submit\": \""
+        << json_escape(files.film_submit_basename) << "\",\n"
+        << "    \"pair_submit\": \""
+        << json_escape(files.pair_submit_basename) << "\",\n"
+        << "    \"bulk_equilibrated_data\": \""
+        << json_escape(files.bulk_equilibrated_data_basename) << "\",\n"
+        << "    \"film_equilibration_output\": \""
+        << json_escape(files.film_equilibration_energy_basename) << "\",\n"
+        << "    \"film_energy_output\": \""
+        << json_escape(files.film_energy_basename) << "\",\n"
+        << "    \"model_info\": \"" << json_escape(files.info_basename) << "\"\n"
         << "  },\n"
         << "  \"generator_input\": {\n"
         << "    \"config_file\": ";
@@ -1473,9 +1704,26 @@ void write_info(
         << "  \"composition\": {\n"
         << "    \"chain_length\": " << settings.length << ",\n"
         << "    \"chain_count\": " << settings.chains << ",\n"
-        << "    \"dms_repeats_per_chain\": "
-        << settings.length - settings.mps_per_chain << ",\n"
-        << "    \"mps_repeats_per_chain\": " << settings.mps_per_chain << ",\n"
+        << "    \"total_repeats\": " << settings.total_repeats << ",\n"
+        << "    \"dms_repeats_total\": "
+        << settings.total_repeats - settings.total_mps_repeats << ",\n"
+        << "    \"mps_repeats_total\": " << settings.total_mps_repeats << ",\n"
+        << "    \"dms_repeats_per_chain\": ";
+    if (uniform_composition)
+        out << settings.length - settings.base_mps_per_chain;
+    else out << "null";
+    out << ",\n"
+        << "    \"mps_repeats_per_chain\": ";
+    if (uniform_composition) out << settings.base_mps_per_chain;
+    else out << "null";
+    out << ",\n"
+        << "    \"chain_composition_distribution\": [{\"mps_repeats\": "
+        << settings.base_mps_per_chain << ", \"chains\": "
+        << settings.chains - settings.chains_with_extra_mps << "}";
+    if (!uniform_composition)
+        out << ", {\"mps_repeats\": " << settings.base_mps_per_chain + 1
+            << ", \"chains\": " << settings.chains_with_extra_mps << "}";
+    out << "],\n"
         << "    \"sequence\": \"" << settings.sequence << "\",\n"
         << "    \"requested_mps_monomer_percent\": ";
     if (settings.mps_weight_percent < 0.0)
@@ -1493,7 +1741,12 @@ void write_info(
         << realized_monomer_percent << ",\n"
         << "    \"realized_mps_weight_percent\": "
         << realized_weight_percent << ",\n"
-        << "    \"chain_mass_g_per_mol\": " << chain_mass(settings) << "\n"
+        << "    \"chain_mass_g_per_mol\": ";
+    if (uniform_composition) out << total_mass(settings) / settings.chains;
+    else out << "null";
+    out << ",\n"
+        << "    \"mean_chain_mass_g_per_mol\": "
+        << total_mass(settings) / settings.chains << "\n"
         << "  },\n"
         << "  \"atom_types\": {\n"
         << "    \"1\": {\"name\": \"neutral DMS\", \"mass\": "
@@ -1521,8 +1774,12 @@ void write_info(
         << dihedrals[4] << "}\n"
         << "  },\n"
         << "  \"initial_box\": {\n"
+        << "    \"geometry\": \"bulk\",\n"
         << "    \"boundary\": \"p p p\",\n"
-        << "    \"length_angstrom\": " << box.length << ",\n"
+        << "    \"lx_angstrom\": " << box.lx << ",\n"
+        << "    \"ly_angstrom\": " << box.ly << ",\n"
+        << "    \"lz_angstrom\": " << box.lz << ",\n"
+        << "    \"length_angstrom\": " << box.lx << ",\n"
         << "    \"density_g_cm3\": " << settings.density << ",\n"
         << "    \"minimum_inter_molecular_separation_angstrom\": "
         << settings.minimum_separation << ",\n"
@@ -1552,24 +1809,40 @@ void write_info(
         << settings.target_density << ",\n"
         << "    \"compression_scale_per_dimension\": "
         << compression_scale << ",\n"
+        << "    \"compression_axes\": \"x y z\",\n"
+        << "    \"pressure_control\": \"isotropic xyz\",\n"
         << "    \"hot_temperature_K\": 800.0,\n"
         << "    \"final_temperature_K\": 300.0,\n"
         << "    \"timestep_fs\": " << kTimestepFs << ",\n"
         << "    \"equilibration_steps\": " << kEquilibrationSteps << ",\n"
-        << "    \"green_kubo_ensemble\": \"NVT\",\n"
-        << "    \"green_kubo_temperature_K\": 300.0,\n"
-        << "    \"green_kubo_production_steps\": "
-        << kViscosityProductionSteps << ",\n"
-        << "    \"green_kubo_production_time_ns\": "
-        << kViscosityProductionSteps * kTimestepFs / 1.0e6 << ",\n"
-        << "    \"stress_sample_every_steps\": "
-        << kStressSampleEverySteps << ",\n"
-        << "    \"stress_sample_interval_fs\": "
-        << kStressSampleEverySteps * kTimestepFs << ",\n"
-        << "    \"stress_columns\": [\"time_fs\", \"pxy_atm\", "
-           "\"pxz_atm\", \"pyz_atm\"],\n"
+        << "    \"bulk_300K_npt_steps\": " << kBulkFinalNptSteps << ",\n"
+        << "    \"surface_tension_method\": \"film pressure anisotropy\",\n"
+        << "    \"energy_sample_every_steps\": "
+        << kEnergySampleEverySteps << ",\n"
+        << "    \"total_run_steps\": " << kEquilibrationSteps << "\n"
+        << "  },\n"
+        << "  \"film_from_bulk\": {\n"
+        << "    \"source_data\": \""
+        << json_escape(files.bulk_equilibrated_data_basename) << "\",\n"
+        << "    \"source_temperature_K\": 300.0,\n"
+        << "    \"minimum_padding_each_z_face_angstrom\": " << padding << ",\n"
+        << "    \"padding_source\": \""
+        << (settings.film_padding > 0.0 ? "explicit" : "300 K repulsive-wall cutoff")
+        << "\",\n"
+        << "    \"initial_lz_rule\": \"bulk equilibrated Lz + 2 * actual padding; actual padding may increase to keep unwrapped chains clear of walls\",\n"
+        << "    \"initial_lx_ly_rule\": \"inherit equilibrated bulk snapshot\",\n"
+        << "    \"boundary_after_conversion\": \"p p f\",\n"
+        << "    \"temporary_wall_steps\": " << kFilmWallSteps << ",\n"
+        << "    \"wall_free_relaxation_steps\": " << kFilmRelaxSteps << ",\n"
+        << "    \"wall_free_relaxation_time_ns\": "
+        << kFilmRelaxSteps * kTimestepFs / 1.0e6 << ",\n"
+        << "    \"film_production_steps\": "
+        << kFilmProductionSteps << ",\n"
+        << "    \"film_production_time_ns\": "
+        << kFilmProductionSteps * kTimestepFs / 1.0e6 << ",\n"
         << "    \"total_run_steps\": "
-        << kEquilibrationSteps + kViscosityProductionSteps << "\n"
+        << kFilmWallSteps + kFilmRelaxSteps + kFilmProductionSteps << ",\n"
+        << "    \"walls_during_production\": false\n"
         << "  }\n"
         << "}\n";
     if (!out) throw std::runtime_error("Failed while writing info file: " + files.info);
@@ -1582,32 +1855,40 @@ void report(
     const Box& box
 ) {
     const double realized_monomer_percent =
-        100.0 * settings.mps_per_chain / settings.length;
+        100.0 * settings.total_mps_repeats / settings.total_repeats;
     const double realized_weight_percent =
-        100.0 * settings.mps_per_chain * kMpsRepeatMass /
-        chain_mass(settings);
+        100.0 * settings.total_mps_repeats * kMpsRepeatMass /
+        total_mass(settings);
     std::cerr << std::fixed << std::setprecision(4)
         << "Generated standalone silicone oil\n"
         << "  chains: " << settings.chains
         << ", repeat units/chain: " << settings.length << '\n'
-        << "  DMS/MPS per chain: "
-        << settings.length - settings.mps_per_chain << '/'
-        << settings.mps_per_chain << '\n'
+        << "  MPS repeats/chain: " << settings.base_mps_per_chain;
+    if (settings.chains_with_extra_mps > 0)
+        std::cerr << " or " << settings.base_mps_per_chain + 1
+                  << " (" << settings.chains_with_extra_mps
+                  << " chains with the extra MPS repeat)";
+    std::cerr << '\n'
         << "  realized MPS: " << realized_monomer_percent
         << " monomer%, " << realized_weight_percent << " wt%\n"
         << "  atoms/bonds/angles/dihedrals: "
         << system.atoms.size() << '/' << system.bonds.size() << '/'
         << system.angles.size() << '/' << system.dihedrals.size() << '\n'
-        << "  initial cubic box: " << box.length << " A at "
+        << "  initial bulk box: " << box.lx << " x " << box.ly << " x "
+        << box.lz << " A at "
         << settings.density << " g/cm^3\n"
         << "  whole chains inside primary box: yes (image flags 0 0 0)\n"
         << "  scripted 800 K compression target: "
         << settings.target_density << " g/cm^3\n"
-        << "  Green-Kubo production: 100 ns at 300 K NVT, stress every "
-        << kStressSampleEverySteps * kTimestepFs << " fs\n"
-        << "  runtime stress output: " << files.stress_basename << '\n'
-        << "  wrote: " << files.data << ", " << files.input << ", "
-        << files.submit << ", " << files.info << '\n';
+        << "  bulk: " << kEquilibrationSteps * kTimestepFs / 1.0e6
+        << " ns through 300 K NPT; no bulk production\n"
+        << "  film: " << kFilmWallSteps * kTimestepFs / 1.0e6
+        << " ns with walls, then " << kFilmRelaxSteps * kTimestepFs / 1.0e6
+        << " ns wall-free equilibration and "
+        << kFilmProductionSteps * kTimestepFs / 1.0e6
+        << " ns pressure production\n"
+        << "  generated files directory: " << files.directory << '\n'
+        << "  submit both stages: bash " << files.pair_submit << '\n';
 }
 
 } // namespace
@@ -1618,11 +1899,20 @@ int main(int argc, char** argv) {
         resolve_composition(settings);
         validate(settings);
         derive_output_name(settings);
+        if (!settings.config_file.empty() &&
+            std::filesystem::path(settings.output).is_relative()) {
+            settings.output =
+                (std::filesystem::path(settings.config_file).parent_path() /
+                 settings.output).lexically_normal().string();
+        }
+
         const Box box = calculate_box(settings);
         const System system = generate_system(settings, box);
         const OutputFiles files = output_files(settings);
+        create_output_directory(files);
         write_data(files, system, box);
         write_input(settings, files);
+        write_film_input(settings, files);
         write_submit(files);
         write_info(settings, files, system, box);
         report(settings, files, system, box);
