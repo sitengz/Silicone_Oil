@@ -86,6 +86,7 @@ class GeneratorWorkflowTest(unittest.TestCase):
                 self.assertIn("run             5000000", bulk)
                 self.assertNotIn("gk_output", bulk)
                 self.assertNotIn("run             20000000", bulk)
+                self.assertNotIn("dump            traj", bulk)
                 self.assertIn("read_data       data." + case + ".npt_eq", film)
                 self.assertEqual(film.count("run             10000000"), 2)
                 self.assertNotIn("run             20000000", film)
@@ -98,6 +99,22 @@ class GeneratorWorkflowTest(unittest.TestCase):
                 self.assertIn("boundary p p f", film)
                 self.assertIn("unfix           zlo_wall", film)
                 self.assertIn("unfix           zhi_wall", film)
+                self.assertIn("dump            filmtraj all custom 100000 ", film)
+                self.assertEqual(film.count("undump          filmtraj"), 1)
+                self.assertLess(film.index("undump          filmtraj"),
+                                film.index("reset_timestep  0 time 0.0"))
+                for script in (bulk, film):
+                    active_dumps = set()
+                    for line in script.splitlines():
+                        fields = line.split()
+                        if not fields:
+                            continue
+                        if fields[0] == "dump":
+                            active_dumps.add(fields[1])
+                        elif fields[0] == "undump":
+                            active_dumps.remove(fields[1])
+                        elif fields[0] == "reset_timestep":
+                            self.assertFalse(active_dumps, line)
                 self.assertLess(
                     film.index("unfix           zhi_wall"),
                     film.index("file energy." + case + ".film_eq.dat"),

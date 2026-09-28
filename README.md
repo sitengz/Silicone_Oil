@@ -410,9 +410,11 @@ This is the cell height, not the oil slab thickness. The film conversion
 follows LAMMPS's [bulk-to-slab image-flag procedure](https://docs.lammps.org/Howto_bulk2slab.html)
 to preserve bonded chains that cross the original periodic z seam. The
 repulsive `wall/lj126` fixes are removed **before** the film's free-surface
-relaxation and energy measurement. Check the film trajectory for atoms
-approaching the fixed z boundaries after wall removal; increase
-`film_padding` if needed.
+relaxation and energy measurement. The generator writes only a short
+temporary-wall film trajectory; long bulk and wall-free film trajectories are
+disabled to limit output size. Inspect the saved `film_eq` and `film_final`
+data snapshots for atoms near the fixed z boundaries; increase `film_padding`
+if needed.
 
 The high-temperature repulsive pair matrix is active only in bulk's first
 five million steps. At 300 K the attractive `lj/gromacs` matrix is used with
@@ -488,3 +490,5 @@ It does not:
   force-field, topology, random-seed, and production settings.
 - `energy.<case>.film_eq.dat` and `energy.<case>.film.dat` are the wall-free
   equilibration and production pressure/energy/box-size time series.
+- `dump.<case>.film.lammpstrj` covers only temporary-wall film initiation;
+  no continuous trajectory is written during bulk or wall-free film stages.

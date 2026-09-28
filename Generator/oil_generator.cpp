@@ -1343,11 +1343,7 @@ void write_input(
         << "thermo_style    custom step temp density lx ly lz pxx pyy pzz "
         << "etotal epair ebond eangle edihed\n"
         << "restart         100000 restart." << files.case_name
-        << ".1 restart." << files.case_name << ".2\n"
-        << "dump            traj all custom 100000 dump." << files.case_name
-        << ".lammpstrj id mol type q x y z ix iy iz\n"
-        << "dump_modify     traj format line "
-        << "\"%d %d %d %.1f %.3f %.3f %.3f %d %d %d\" sort id\n\n"
+        << ".1 restart." << files.case_name << ".2\n\n"
         << "minimize        1e-4 1e-6 100 1000\n"
         << "velocity        all create 800.0 " << settings.velocity_seed
         << " mom yes rot yes dist gaussian\n\n"
@@ -1387,8 +1383,7 @@ void write_input(
         << "iso 1.0 1.0 500.0\n"
         << "run             " << kBulkFinalNptSteps << "\n"
         << "write_data      " << files.bulk_equilibrated_data_basename << " nocoeff\n"
-        << "unfix           integrate\n"
-        << "undump          traj\n";
+        << "unfix           integrate\n";
     if (!out) throw std::runtime_error("Failed while writing input file: " + files.input);
 }
 
@@ -1465,7 +1460,8 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
         << "timestep        " << kTimestepFs << "\n"
         << "thermo          1000\n"
         << "thermo_style    custom step temp pe density lx ly lz pxx pyy pzz\n"
-        << "dump            filmtraj all custom 500000 dump." << files.case_name
+        << "# One brief trajectory for checking the temporary-wall initiation.\n"
+        << "dump            filmtraj all custom " << kFilmWallSteps << " dump." << files.case_name
         << ".film.lammpstrj id mol type x y z ix iy iz\n"
         << "dump_modify     filmtraj sort id\n"
         << "velocity        all create 300.0 " << settings.velocity_seed
@@ -1475,7 +1471,8 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
         << "run             " << kFilmWallSteps << "\n"
         << "unfix           integrate\n"
         << "unfix           zlo_wall\n"
-        << "unfix           zhi_wall\n\n"
+        << "unfix           zhi_wall\n"
+        << "undump          filmtraj\n\n"
         << "# Free surfaces: no wall fix during relaxation or measurement.\n"
         << "reset_timestep  0 time 0.0\n"
         << "thermo          100000\n"
@@ -1501,7 +1498,6 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
         << "unfix           equil_output\n"
         << "unfix           integrate\n"
         << "write_data      " << files.film_equilibrated_data_basename << " nocoeff\n"
-        << "undump          filmtraj\n"
         << "reset_timestep  0 time 0.0\n"
         << "fix             integrate all nvt temp 300.0 300.0 50.0\n"
         << "fix             energy_output all print " << kEnergySampleEverySteps
