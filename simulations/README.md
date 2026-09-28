@@ -44,8 +44,18 @@ Run a case from the repository root with, for example:
 make generate CONFIG=simulations/N32_PDI1.2/model.conf
 ```
 
-This produces initial bulk data, bulk and film LAMMPS inputs, and submit
-scripts beside that config. It does **not** submit simulation jobs. Generated
+To generate inputs for all 24 cases in one sequential run, use:
+
+```bash
+make -C simulations
+```
+
+The separate `simulations/Makefile` checks that all 24 configs exist, builds
+the oil generator if needed, and writes each case's files beside its
+`model.conf`. It does not submit jobs or run LAMMPS.
+
+Both commands produce initial bulk data, bulk and film LAMMPS inputs, and submit
+scripts beside each config. Neither command submits simulation jobs. Generated
 simulation files are ignored by Git; the explicit configs are retained.
 
 The four summary tables are in `table_PDI1.csv`, `table_N16.csv`,
