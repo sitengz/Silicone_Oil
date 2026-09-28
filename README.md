@@ -11,7 +11,7 @@ contains single-chain ATSC4i and film pressure-anisotropy analyzers.
 ```text
 Generator/    oil generator and configuration parser
 Analysis/     ATSC4i and surface-tension tools
-simulations/  numbered formulation configs and their generated files
+simulations/  numbered formulations and explicit PDMS length-distribution cases
 examples/     validation configs and their generated files
 model.conf    current editable generator configuration
 ```
@@ -94,6 +94,24 @@ The included root configuration describes 500 chains of 32 repeat units with
 config file's directory. Without a config, it is resolved from the current
 working directory. Command-line-only usage remains available. Generating
 files does not submit jobs or run LAMMPS.
+
+For a variable-length system, replace `length` and `chains` with repeatable
+length/count rows. These rows are the complete molecule list; the generator
+does not calculate a distribution or PDI:
+
+```text
+chain_count = 4 2
+chain_count = 5 3
+chain_count = 6 1
+mps_percent = 0
+output = data.example_distribution
+```
+
+The equivalent command-line option is repeatable, for example
+`--chain-count "4 2" --chain-count "5 3"`. Do not mix `chain_count` with
+`length` or `chains`. The `.info` file records the actual length/count list.
+The 24 PDMS series configs and summary tables are described in
+[`simulations/README.md`](simulations/README.md).
 
 ## Default model
 

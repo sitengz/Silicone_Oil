@@ -155,6 +155,80 @@ class GeneratorWorkflowTest(unittest.TestCase):
         self.assertTrue((folder / "submit.adjacent.pair.sh").is_file())
         self.assertFalse((folder / "adjacent").exists())
 
+    def test_explicit_chain_length_counts(self):
+        folder = self.work / "length_counts"
+        folder.mkdir()
+        config = folder / "model.conf"
+        config.write_text(
+            "chain_count = 6 1\nchain_count = 4 2\n"
+            "mps_percent = 0\noutput = data.length_counts\n"
+        )
+        result = subprocess.run(
+            [str(self.generator), "--config", str(config)],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        info = json.loads((folder / "length_counts.info").read_text())
+        composition = info["composition"]
+        self.assertIsNone(composition["chain_length"])
+        self.assertEqual(composition["chain_count"], 3)
+        self.assertEqual(composition["total_repeats"], 14)
+        self.assertEqual(composition["chain_length_distribution"], [
+            {"length": 4, "chains": 2}, {"length": 6, "chains": 1}
+        ])
+        self.assertEqual(info["topology_counts"]["atoms"], 14)
+        self.assertEqual(info["topology_counts"]["bonds"]["total"], 11)
+        data = (folder / "data.length_counts").read_text()
+        atoms = data.split("Atoms # full\n\n", 1)[1].split("\nBonds\n", 1)[0]
+        lengths = Counter()
+        for line in atoms.splitlines():
+            if line.strip():
+                fields = line.split()
+                lengths[int(fields[1])] += 1
+        self.assertEqual(sorted(lengths.values()), [4, 4, 6])
+
+    def test_chain_count_rejects_duplicate_and_fixed_length_mix(self):
+        for config_text, expected in (
+            ("chain_count = 4 2\nchain_count = 4 3\n", "duplicate length"),
+            ("chain_count = 4 2\nlength = 4\n", "cannot be mixed"),
+            ("chain_count = 4 0\n", "must be positive"),
+        ):
+            with self.subTest(config_text=config_text):
+                folder = self.work / "invalid_counts"
+                folder.mkdir(exist_ok=True)
+                config = folder / "model.conf"
+                config.write_text(config_text)
+                result = subprocess.run(
+                    [str(self.generator), "--config", str(config)],
+                    cwd=ROOT, text=True, capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+
+    def test_explicit_lengths_preserve_global_mps_fraction(self):
+        folder = self.work / "mixed_lengths"
+        folder.mkdir()
+        config = folder / "model.conf"
+        config.write_text(
+            "chain_count = 4 2\nchain_count = 6 1\n"
+            "mps_percent = 50\noutput = data.mixed_lengths\n"
+        )
+        result = subprocess.run(
+            [str(self.generator), "--config", str(config)],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        info = json.loads((folder / "mixed_lengths.info").read_text())
+        composition = info["composition"]
+        self.assertEqual(composition["total_repeats"], 14)
+        self.assertEqual(composition["mps_repeats_total"], 7)
+        self.assertEqual(info["topology_counts"]["atoms"], 21)
+        self.assertEqual(
+            sum(row["mps_repeats"] * row["chains"]
+                for row in composition["chain_composition_distribution"]),
+            7,
+        )
+
     def test_numbered_formulations_distribute_mps_across_chains(self):
         for case, length, percent, configured_chains in FORMULATIONS:
             with self.subTest(case=case):

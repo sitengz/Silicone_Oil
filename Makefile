@@ -13,7 +13,7 @@ MOLECULE ?= 1
 PHASE ?= prod
 BLOCK_NS ?= 5
 
-.PHONY: all generate atsc4i surface-tension test clean
+.PHONY: all generate pdms-series pdms-figures atsc4i surface-tension test clean
 
 all: $(GENERATOR)
 
@@ -22,6 +22,12 @@ $(GENERATOR): $(SOURCES)
 
 generate: $(GENERATOR)
 	./$(GENERATOR) --config "$(CONFIG)" $(GENERATOR_ARGS)
+
+pdms-series:
+	$(PYTHON) simulations/build_pdms_series.py
+
+pdms-figures: pdms-series
+	$(PYTHON) simulations/render_tiff.py
 
 atsc4i:
 	$(PYTHON) Analysis/atsc4i.py --config "$(CONFIG)" --molecule-id "$(MOLECULE)"

@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -114,6 +115,12 @@ T clamp_value(T value, T lower, T upper) {
 struct Settings {
     int length = 16;
     int chains = 625;
+    bool length_explicit = false;
+    bool chains_explicit = false;
+    bool length_list_mode = false;
+    std::vector<std::pair<int, int>> chain_count_entries;
+    std::vector<int> molecule_lengths;
+    std::vector<int> molecule_mps_counts;
     double mps_monomer_percent = 100.0;
     double mps_weight_percent = -1.0;
     bool mps_percent_explicit = false;
@@ -244,6 +251,8 @@ void print_help(const char* program) {
         << "backbone bead with one type-5 pendant bead.\n\n"
         << "  --length N              repeat units per oil chain (default: 16)\n"
         << "  --chains M              number of oil chains (default: 625)\n"
+        << "  --chain-count 'N COUNT'  repeatable length/count row; in a config, use\n"
+        << "                           chain_count = N COUNT (cannot mix with length/chains)\n"
         << "  --n N                    alias for --length\n"
         << "  --m M                    alias for --chains\n"
         << "  --mps-percent X          overall MPS monomer percentage, 0-100 (default: 100)\n"
@@ -265,11 +274,20 @@ void print_help(const char* program) {
 
 void apply_option(Settings& settings, const std::string& option,
                   const std::string& value) {
-    if (option == "--length" || option == "--n")
+    if (option == "--length" || option == "--n") {
         settings.length = parse_int(value, option);
-    else if (option == "--chains" || option == "--m")
+        settings.length_explicit = true;
+    } else if (option == "--chains" || option == "--m") {
         settings.chains = parse_int(value, option);
-    else if (option == "--mps-percent") {
+        settings.chains_explicit = true;
+    } else if (option == "--chain-count") {
+        std::istringstream row(value);
+        std::string length_text, count_text, extra;
+        if (!(row >> length_text >> count_text) || (row >> extra))
+            throw std::runtime_error("--chain-count needs two integers: length count");
+        settings.chain_count_entries.emplace_back(
+            parse_int(length_text, option), parse_int(count_text, option));
+    } else if (option == "--mps-percent") {
         settings.mps_monomer_percent = parse_double(value, option);
         settings.mps_percent_explicit = true;
     } else if (option == "--mps-wt")
@@ -322,14 +340,46 @@ std::string filename_number(double value) {
 }
 
 void resolve_composition(Settings& settings) {
-    if (settings.length <= 0)
-        throw std::runtime_error("--length must be positive");
-    if (settings.chains <= 0)
-        throw std::runtime_error("--chains must be positive");
+    settings.length_list_mode = !settings.chain_count_entries.empty();
+    if (settings.length_list_mode) {
+        if (settings.length_explicit || settings.chains_explicit)
+            throw std::runtime_error("--chain-count cannot be mixed with --length or --chains");
+        std::sort(settings.chain_count_entries.begin(), settings.chain_count_entries.end());
+        long long chain_total = 0;
+        long long repeat_total = 0;
+        int previous_length = 0;
+        for (const auto& entry : settings.chain_count_entries) {
+            const int length = entry.first;
+            const int count = entry.second;
+            if (length <= 0 || count <= 0)
+                throw std::runtime_error("--chain-count lengths and counts must be positive");
+            if (length == previous_length)
+                throw std::runtime_error("--chain-count contains a duplicate length");
+            previous_length = length;
+            chain_total += count;
+            repeat_total += 1LL * length * count;
+            if (chain_total > std::numeric_limits<int>::max() ||
+                repeat_total > std::numeric_limits<int>::max())
+                throw std::runtime_error("--chain-count exceeds 32-bit LAMMPS limits");
+        }
+        settings.chains = static_cast<int>(chain_total);
+        settings.total_repeats = repeat_total;
+        settings.molecule_lengths.reserve(static_cast<std::size_t>(settings.chains));
+        for (const auto& entry : settings.chain_count_entries)
+            settings.molecule_lengths.insert(settings.molecule_lengths.end(),
+                                             static_cast<std::size_t>(entry.second), entry.first);
+    } else {
+        if (settings.length <= 0)
+            throw std::runtime_error("--length must be positive");
+        if (settings.chains <= 0)
+            throw std::runtime_error("--chains must be positive");
+        settings.total_repeats = 1LL * settings.length * settings.chains;
+        settings.molecule_lengths.assign(static_cast<std::size_t>(settings.chains),
+                                         settings.length);
+    }
     if (settings.mps_weight_percent >= 0.0 && settings.mps_percent_explicit)
         throw std::runtime_error("--mps-wt and --mps-percent are mutually exclusive");
 
-    settings.total_repeats = 1LL * settings.length * settings.chains;
     double requested_mps_count = 0.0;
     if (settings.mps_weight_percent >= 0.0) {
         if (settings.mps_weight_percent > 100.0)
@@ -353,6 +403,33 @@ void resolve_composition(Settings& settings) {
         settings.total_mps_repeats / settings.chains);
     settings.chains_with_extra_mps = static_cast<int>(
         settings.total_mps_repeats % settings.chains);
+    settings.molecule_mps_counts.assign(
+        static_cast<std::size_t>(settings.chains), settings.base_mps_per_chain);
+    if (!settings.length_list_mode) {
+        for (int i = 0; i < settings.chains_with_extra_mps; ++i)
+            ++settings.molecule_mps_counts[static_cast<std::size_t>(i)];
+    } else {
+        // Largest remainders distribute a global composition across unequal chains.
+        std::vector<std::pair<double, int>> remainders;
+        remainders.reserve(static_cast<std::size_t>(settings.chains));
+        long long allocated = 0;
+        for (int i = 0; i < settings.chains; ++i) {
+            const double quota = static_cast<double>(settings.molecule_lengths[static_cast<std::size_t>(i)]) *
+                                 settings.total_mps_repeats / settings.total_repeats;
+            const int base = static_cast<int>(std::floor(quota));
+            settings.molecule_mps_counts[static_cast<std::size_t>(i)] = base;
+            allocated += base;
+            remainders.emplace_back(quota - base, i);
+        }
+        std::sort(remainders.begin(), remainders.end(),
+                  [](const auto& a, const auto& b) {
+                      if (a.first != b.first) return a.first > b.first;
+                      return a.second < b.second;
+                  });
+        for (long long i = 0; i < settings.total_mps_repeats - allocated; ++i)
+            ++settings.molecule_mps_counts[static_cast<std::size_t>(
+                remainders[static_cast<std::size_t>(i)].second)];
+    }
 }
 
 void validate(const Settings& settings) {
@@ -393,7 +470,10 @@ void derive_output_name(Settings& settings) {
     } else {
         name << "data.Oil_Copolymer";
     }
-    name << "_N" << settings.length << "_M" << settings.chains;
+    if (settings.length_list_mode)
+        name << "_R" << settings.total_repeats << "_M" << settings.chains;
+    else
+        name << "_N" << settings.length << "_M" << settings.chains;
     if (settings.total_mps_repeats != 0 &&
         settings.total_mps_repeats != settings.total_repeats) {
         if (settings.mps_weight_percent >= 0.0)
@@ -418,30 +498,31 @@ Box calculate_box(const Settings& settings) {
 
 std::vector<bool> make_sequence(
     const Settings& settings,
+    int length,
     int count,
     std::mt19937& rng
 ) {
-    std::vector<bool> is_mps(static_cast<std::size_t>(settings.length), false);
+    std::vector<bool> is_mps(static_cast<std::size_t>(length), false);
     if (count == 0) return is_mps;
-    if (count == settings.length) {
+    if (count == length) {
         std::fill(is_mps.begin(), is_mps.end(), true);
         return is_mps;
     }
 
     if (settings.sequence == "random") {
-        std::vector<int> sites(static_cast<std::size_t>(settings.length));
-        for (int i = 0; i < settings.length; ++i) sites[static_cast<std::size_t>(i)] = i;
+        std::vector<int> sites(static_cast<std::size_t>(length));
+        for (int i = 0; i < length; ++i) sites[static_cast<std::size_t>(i)] = i;
         std::shuffle(sites.begin(), sites.end(), rng);
         for (int i = 0; i < count; ++i)
             is_mps[static_cast<std::size_t>(sites[static_cast<std::size_t>(i)])] = true;
     } else if (settings.sequence == "alternating") {
-        for (int i = 0; i < settings.length; ++i) {
-            const int before = i * count / settings.length;
-            const int after = (i + 1) * count / settings.length;
+        for (int i = 0; i < length; ++i) {
+            const int before = i * count / length;
+            const int after = (i + 1) * count / length;
             if (after > before) is_mps[static_cast<std::size_t>(i)] = true;
         }
     } else {
-        const int first = (settings.length - count) / 2;
+        const int first = (length - count) / 2;
         for (int i = first; i < first + count; ++i)
             is_mps[static_cast<std::size_t>(i)] = true;
     }
@@ -960,12 +1041,13 @@ System generate_system(
     system.atoms.reserve(expected_atoms);
 
     std::mt19937 rng(settings.seed);
-    std::vector<int> mps_counts(
-        static_cast<std::size_t>(settings.chains), settings.base_mps_per_chain);
-    for (int i = 0; i < settings.chains_with_extra_mps; ++i)
-        ++mps_counts[static_cast<std::size_t>(i)];
-    if (settings.chains_with_extra_mps > 0)
-        std::shuffle(mps_counts.begin(), mps_counts.end(), rng);
+    std::vector<std::pair<int, int>> molecules;
+    molecules.reserve(static_cast<std::size_t>(settings.chains));
+    for (int i = 0; i < settings.chains; ++i)
+        molecules.emplace_back(settings.molecule_lengths[static_cast<std::size_t>(i)],
+                               settings.molecule_mps_counts[static_cast<std::size_t>(i)]);
+    if (settings.length_list_mode || settings.chains_with_extra_mps > 0)
+        std::shuffle(molecules.begin(), molecules.end(), rng);
     PeriodicCellList cell_list(box, settings.minimum_separation, false);
     const int nx = static_cast<int>(std::ceil(std::cbrt(
         static_cast<double>(settings.chains) * box.lx / box.lz)));
@@ -979,8 +1061,10 @@ System generate_system(
     std::uniform_real_distribution<double> jitter(-0.15, 0.15);
 
     for (int molecule_index = 0; molecule_index < settings.chains; ++molecule_index) {
+        const int length = molecules[static_cast<std::size_t>(molecule_index)].first;
         const std::vector<bool> is_mps = make_sequence(
-            settings, mps_counts[static_cast<std::size_t>(molecule_index)], rng);
+            settings, length,
+            molecules[static_cast<std::size_t>(molecule_index)].second, rng);
         const int gx = molecule_index % nx;
         const int gy = (molecule_index / nx) % ny;
         const int gz = molecule_index / (nx * ny);
@@ -1065,10 +1149,10 @@ System generate_system(
         }
 
         cell_list.insert(accepted_positions);
-        std::vector<int> backbone_ids(static_cast<std::size_t>(settings.length));
-        std::vector<int> pendant_ids(static_cast<std::size_t>(settings.length), 0);
+        std::vector<int> backbone_ids(static_cast<std::size_t>(length));
+        std::vector<int> pendant_ids(static_cast<std::size_t>(length), 0);
         std::size_t site_index = 0;
-        for (int i = 0; i < settings.length; ++i, ++site_index) {
+        for (int i = 0; i < length; ++i, ++site_index) {
             const Vec3& position = accepted_positions[site_index];
             const int id = static_cast<int>(system.atoms.size()) + 1;
             backbone_ids[static_cast<std::size_t>(i)] = id;
@@ -1083,7 +1167,7 @@ System generate_system(
                 0
             });
         }
-        for (int i = 0; i < settings.length; ++i) {
+        for (int i = 0; i < length; ++i) {
             if (!is_mps[static_cast<std::size_t>(i)]) continue;
             const Vec3& position = accepted_positions[site_index++];
             const int id = static_cast<int>(system.atoms.size()) + 1;
@@ -1661,7 +1745,15 @@ void write_info(
     const double realized_weight_percent =
         100.0 * settings.total_mps_repeats * kMpsRepeatMass /
         total_mass(settings);
-    const bool uniform_composition = settings.chains_with_extra_mps == 0;
+    const bool uniform_length = std::all_of(
+        settings.molecule_lengths.begin(), settings.molecule_lengths.end(),
+        [&](int length) { return length == settings.molecule_lengths.front(); });
+    const bool uniform_composition = std::all_of(
+        settings.molecule_mps_counts.begin(), settings.molecule_mps_counts.end(),
+        [&](int count) { return count == settings.molecule_mps_counts.front(); });
+    std::map<int, int> composition_distribution;
+    for (int count : settings.molecule_mps_counts)
+        ++composition_distribution[count];
     const double compression_scale =
         std::cbrt(settings.density / settings.target_density);
     const PairParameters cold_wall = dms_pair_parameters(300.0);
@@ -1698,27 +1790,42 @@ void write_info(
         << "    \"precedence\": \"defaults < config file < command line\"\n"
         << "  },\n"
         << "  \"composition\": {\n"
-        << "    \"chain_length\": " << settings.length << ",\n"
+        << "    \"chain_length\": ";
+    if (uniform_length) out << settings.molecule_lengths.front();
+    else out << "null";
+    out << ",\n"
+        << "    \"chain_length_distribution\": [";
+    for (std::size_t i = 0; i < settings.chain_count_entries.size(); ++i) {
+        if (i != 0) out << ", ";
+        out << "{\"length\": " << settings.chain_count_entries[i].first
+            << ", \"chains\": " << settings.chain_count_entries[i].second << '}';
+    }
+    if (!settings.length_list_mode)
+        out << "{\"length\": " << settings.length
+            << ", \"chains\": " << settings.chains << '}';
+    out << "],\n"
         << "    \"chain_count\": " << settings.chains << ",\n"
         << "    \"total_repeats\": " << settings.total_repeats << ",\n"
         << "    \"dms_repeats_total\": "
         << settings.total_repeats - settings.total_mps_repeats << ",\n"
         << "    \"mps_repeats_total\": " << settings.total_mps_repeats << ",\n"
         << "    \"dms_repeats_per_chain\": ";
-    if (uniform_composition)
-        out << settings.length - settings.base_mps_per_chain;
+    if (uniform_length && uniform_composition)
+        out << settings.molecule_lengths.front() - settings.molecule_mps_counts.front();
     else out << "null";
     out << ",\n"
         << "    \"mps_repeats_per_chain\": ";
-    if (uniform_composition) out << settings.base_mps_per_chain;
+    if (uniform_length && uniform_composition) out << settings.molecule_mps_counts.front();
     else out << "null";
     out << ",\n"
-        << "    \"chain_composition_distribution\": [{\"mps_repeats\": "
-        << settings.base_mps_per_chain << ", \"chains\": "
-        << settings.chains - settings.chains_with_extra_mps << "}";
-    if (!uniform_composition)
-        out << ", {\"mps_repeats\": " << settings.base_mps_per_chain + 1
-            << ", \"chains\": " << settings.chains_with_extra_mps << "}";
+        << "    \"chain_composition_distribution\": [";
+    bool first_composition = true;
+    for (const auto& entry : composition_distribution) {
+        if (!first_composition) out << ", ";
+        out << "{\"mps_repeats\": " << entry.first
+            << ", \"chains\": " << entry.second << '}';
+        first_composition = false;
+    }
     out << "],\n"
         << "    \"sequence\": \"" << settings.sequence << "\",\n"
         << "    \"requested_mps_monomer_percent\": ";
@@ -1738,7 +1845,8 @@ void write_info(
         << "    \"realized_mps_weight_percent\": "
         << realized_weight_percent << ",\n"
         << "    \"chain_mass_g_per_mol\": ";
-    if (uniform_composition) out << total_mass(settings) / settings.chains;
+    if (uniform_length && uniform_composition)
+        out << total_mass(settings) / settings.chains;
     else out << "null";
     out << ",\n"
         << "    \"mean_chain_mass_g_per_mol\": "
@@ -1857,10 +1965,20 @@ void report(
         total_mass(settings);
     std::cerr << std::fixed << std::setprecision(4)
         << "Generated standalone silicone oil\n"
-        << "  chains: " << settings.chains
-        << ", repeat units/chain: " << settings.length << '\n'
-        << "  MPS repeats/chain: " << settings.base_mps_per_chain;
-    if (settings.chains_with_extra_mps > 0)
+        << "  chains: " << settings.chains << ", repeat units/chain: ";
+    if (settings.length_list_mode)
+        std::cerr << "listed (" << settings.chain_count_entries.front().first
+                  << '-' << settings.chain_count_entries.back().first << ")\n";
+    else
+        std::cerr << settings.length << '\n';
+    std::cerr << "  MPS repeats/chain: ";
+    if (settings.total_mps_repeats == 0)
+        std::cerr << 0;
+    else if (settings.length_list_mode)
+        std::cerr << "allocated from the global composition";
+    else
+        std::cerr << settings.base_mps_per_chain;
+    if (!settings.length_list_mode && settings.chains_with_extra_mps > 0)
         std::cerr << " or " << settings.base_mps_per_chain + 1
                   << " (" << settings.chains_with_extra_mps
                   << " chains with the extra MPS repeat)";
