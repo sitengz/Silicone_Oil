@@ -53,9 +53,11 @@ class PDMSCaseSeriesTest(unittest.TestCase):
                     self.assertEqual(sorted(counts), list(range(min(counts), max(counts) + 1)))
                     self.assertTrue(SERIES.is_unimodal(list(counts.values())))
                 chains, beads, realized_mean, _, realized_pdi = SERIES.statistics(counts)
-                self.assertEqual(chains, 99_999 // mean)
+                expected_chains = ((100_000 if target == 1.0 else 99_999)
+                                   // mean)
+                self.assertEqual(chains, expected_chains)
                 self.assertEqual(beads, mean * chains)
-                self.assertLess(beads, 100_000)
+                self.assertLessEqual(beads, 100_000)
                 self.assertEqual(realized_mean, mean)
                 self.assertLess(abs(realized_pdi - target), 0.0001)
                 self.assertIn(f"output = data.{name}", config.read_text())
@@ -64,6 +66,11 @@ class PDMSCaseSeriesTest(unittest.TestCase):
         with (SIMULATIONS / "table_PDI1.csv").open() as handle:
             mono = list(csv.DictReader(handle))
         self.assertEqual(len(mono), 6)
+        for row in mono:
+            counts = read_counts(SIMULATIONS / row["Case"] / "model.conf")
+            self.assertEqual(counts, {int(row["N"]): int(row["Chains"])})
+            self.assertEqual(sum(n * count for n, count in counts.items()),
+                             int(row["Beads"]))
         for mean in SERIES.MEANS:
             with (SIMULATIONS / f"table_N{mean}.csv").open() as handle:
                 rows = list(csv.DictReader(handle))

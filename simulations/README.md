@@ -35,8 +35,8 @@ PDI targets (1.05 through 1.30 in steps of 0.05) at each of Mn = 16, 32,
 and 64. Every config gives an explicit `chain_count = length count` list.
 The generator has no PDI option or distribution fitting. It only builds the
 listed molecules. The N16/PDI1.30 case uses lengths 4–34; other N16 cases
-are capped at 32. The N32 and N64 caps are 64 and 128. All cases have fewer
-than 100,000 DMS beads and exact integer-repeat Mn.
+are capped at 32. The N32 and N64 caps are 64 and 128. All cases have at most
+100,000 DMS beads and exact integer-repeat Mn.
 
 Run a case from the repository root with, for example:
 

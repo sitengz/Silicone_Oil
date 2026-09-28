@@ -8,6 +8,7 @@ the resulting ``chain_count = length count`` rows and knows nothing about PDI.
 from __future__ import annotations
 
 import csv
+import io
 import math
 from pathlib import Path
 
@@ -267,10 +268,13 @@ def write_config(name: str, counts: dict[int, int]) -> None:
 
 
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
-    with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
+    handle = io.StringIO()
+    writer = csv.DictWriter(handle, fieldnames=list(rows[0]), lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    content = handle.getvalue()
+    if not path.exists() or path.read_text() != content:
+        path.write_text(content)
 
 
 def markdown_table(rows: list[dict[str, object]]) -> list[str]:
@@ -368,7 +372,7 @@ def write_svg(mean: int, series: list[tuple[float, dict[int, int], float, float]
 def main() -> None:
     mono_rows = []
     for length in MONO_LENGTHS:
-        chains = 99_999 // length
+        chains = 100_000 // length
         counts = {length: chains}
         name = case_name(length, 1.0)
         write_config(name, counts)
