@@ -48,6 +48,29 @@ class SurfaceTensionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "lacks required"):
                 surface_tension.read_pressure(path)
 
+    def test_reads_wall_force_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "energy.film.dat"
+            path.write_text(
+                "# time_fs pxx_atm pyy_atm pzz_atm lz_A wall_lo_force wall_hi_force\n"
+                "0 -20 -20 0 300 0 0\n"
+                "5000 -20 -20 0 300 0 0\n"
+            )
+            rows = surface_tension.read_pressure(path)
+            self.assertEqual(rows[0]["wall_lo_force"], 0)
+            self.assertAlmostEqual(surface_tension.gamma_mn_per_m(rows[0]), 30.3975)
+
+    def test_rejects_one_wall_force_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "energy.film.dat"
+            path.write_text(
+                "# time_fs pxx_atm pyy_atm pzz_atm lz_A wall_lo_force\n"
+                "0 -20 -20 0 300 0\n"
+                "5000 -20 -20 0 300 0\n"
+            )
+            with self.assertRaisesRegex(ValueError, "both wall-force columns"):
+                surface_tension.read_pressure(path)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,7 @@ constexpr int kEnergySampleEverySteps = 1000;
 constexpr long long kFilmWallSteps = 100000;
 constexpr long long kFilmRelaxSteps = 10000000;
 constexpr long long kFilmProductionSteps = 10000000;
+constexpr double kMinimumFilmPaddingAngstrom = 20.0;
 
 constexpr double kDmsMass = 74.0;
 constexpr double kMpsBackboneMass = 59.1204;
@@ -127,7 +128,7 @@ struct Settings {
     std::string sequence = "random";
     double density = 0.1;
     double target_density = 0.8;
-    double film_padding = -1.0; // Negative selects the 300 K repulsive-wall cutoff.
+    double film_padding = -1.0; // Negative selects the 20 A safety minimum.
     double minimum_separation = 4.5;
     std::uint32_t seed = 20260727u;
     std::uint32_t velocity_seed = 492845u;
@@ -139,6 +140,10 @@ struct Settings {
     int chains_with_extra_mps = 0;
     std::string config_file;
 };
+
+double film_padding_angstrom(const Settings& settings) {
+    return std::max(kMinimumFilmPaddingAngstrom, settings.film_padding);
+}
 
 struct Atom {
     int id = 0;
@@ -261,8 +266,8 @@ void print_help(const char* program) {
         << "  --sequence MODE          random, alternating, or block (default: random)\n"
         << "  --density X              initial mass density in g/cm^3 (default: 0.1)\n"
         << "  --target-density X       density after 800 K compression (default: 0.8)\n"
-        << "  --film-padding X         vacuum added at each z face in A\n"
-        << "                           (default: 300 K repulsive-wall cutoff)\n"
+        << "  --film-padding X         requested vacuum at each z face in A\n"
+        << "                           (minimum/default: 20 A; smaller values raised to 20 A)\n"
         << "  --min-separation X       minimum intermolecular distance in A (default: 4.5)\n"
         << "  --seed N                 conformation/packing seed (default: 20260727)\n"
         << "  --velocity-seed N        LAMMPS velocity seed (default: 492845)\n"
@@ -1476,8 +1481,7 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
     if (!out)
         throw std::runtime_error("Cannot open film input file: " + files.film_input);
     const PairParameters wall = dms_pair_parameters(300.0);
-    const double padding = settings.film_padding > 0.0
-        ? settings.film_padding : repulsive_cutoff(wall);
+    const double padding = film_padding_angstrom(settings);
 
     out << std::fixed << std::setprecision(9)
         << "# Derived film: read the equilibrated bulk, preserve its topology and x/y box.\n"
@@ -1513,8 +1517,8 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
         << "compute         zu_min all reduce min c_zu_atom\n"
         << "compute         zu_max all reduce max c_zu_atom\n"
         << "run             0\n"
-        << "# Use the requested cutoff padding, enlarged only if an unwrapped\n"
-        << "# chain would otherwise touch or cross a temporary wall.\n"
+        << "# Use at least 20 A on each face, enlarged if an unwrapped\n"
+        << "# chain would otherwise touch or cross a safety wall.\n"
         << "# max(x,y) is not a scalar function in LAMMPS equal-style variables.\n"
         << "variable        lower_pad equal zlo-c_zu_min+" << repulsive_cutoff(wall) << "\n"
         << "variable        upper_pad equal c_zu_max-zhi+" << repulsive_cutoff(wall) << "\n"
@@ -1534,17 +1538,19 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
         << "read_dump       " << files.unwrapped_dump_basename
         << " 0 x y z box no replace yes\n"
         << "write_data      " << files.film_initial_data_basename << " nocoeff\n\n"
-        << "# Temporary z walls stabilize the newly exposed surfaces.\n"
+        << "# Edge safety walls remain active through film production.\n"
         << "fix             zlo_wall all wall/lj126 zlo EDGE "
         << wall.epsilon << ' ' << wall.sigma << ' '
         << repulsive_cutoff(wall) << " units box\n"
         << "fix             zhi_wall all wall/lj126 zhi EDGE "
         << wall.epsilon << ' ' << wall.sigma << ' '
         << repulsive_cutoff(wall) << " units box\n"
+        << "fix_modify      zlo_wall virial no\n"
+        << "fix_modify      zhi_wall virial no\n"
         << "timestep        " << kTimestepFs << "\n"
         << "thermo          1000\n"
         << "thermo_style    custom step temp pe density lx ly lz pxx pyy pzz\n"
-        << "# One brief trajectory for checking the temporary-wall initiation.\n"
+        << "# One brief trajectory for checking the initial guarded stage.\n"
         << "dump            filmtraj all custom " << kFilmWallSteps << " dump." << files.case_name
         << ".film.lammpstrj id mol type x y z ix iy iz\n"
         << "dump_modify     filmtraj sort id\n"
@@ -1554,10 +1560,8 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
            "x 1.0 1.0 500.0 y 1.0 1.0 500.0 couple xy\n"
         << "run             " << kFilmWallSteps << "\n"
         << "unfix           integrate\n"
-        << "unfix           zlo_wall\n"
-        << "unfix           zhi_wall\n"
         << "undump          filmtraj\n\n"
-        << "# Free surfaces: no wall fix during relaxation or measurement.\n"
+        << "# Safety walls are distant guards; check that their forces stay zero.\n"
         << "reset_timestep  0 time 0.0\n"
         << "thermo          100000\n"
         << "thermo_style    custom time temp pe pxx pyy pzz lx ly lz\n"
@@ -1571,13 +1575,16 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
         << "variable        surface_lx equal lx\n"
         << "variable        surface_ly equal ly\n"
         << "variable        surface_lz equal lz\n"
+        << "variable        surface_wall_lo equal f_zlo_wall[1]\n"
+        << "variable        surface_wall_hi equal f_zhi_wall[1]\n"
         << "fix             integrate all nvt temp 300.0 300.0 50.0\n"
         << "fix             equil_output all print " << kEnergySampleEverySteps
         << " \"${surface_time} ${surface_temp} ${surface_pe} ${surface_pxx} ${surface_pyy} "
-           "${surface_pzz} ${surface_lx} ${surface_ly} ${surface_lz}\" file "
+           "${surface_pzz} ${surface_lx} ${surface_ly} ${surface_lz} "
+           "${surface_wall_lo} ${surface_wall_hi}\" file "
         << files.film_equilibration_energy_basename
         << " screen no title \"# time_fs temp_K pe_kcal_per_mol pxx_atm pyy_atm "
-           "pzz_atm lx_A ly_A lz_A\"\n"
+           "pzz_atm lx_A ly_A lz_A wall_lo_force wall_hi_force\"\n"
         << "run             " << kFilmRelaxSteps << "\n"
         << "unfix           equil_output\n"
         << "unfix           integrate\n"
@@ -1586,10 +1593,11 @@ void write_film_input(const Settings& settings, const OutputFiles& files) {
         << "fix             integrate all nvt temp 300.0 300.0 50.0\n"
         << "fix             energy_output all print " << kEnergySampleEverySteps
         << " \"${surface_time} ${surface_temp} ${surface_pe} ${surface_pxx} ${surface_pyy} "
-           "${surface_pzz} ${surface_lx} ${surface_ly} ${surface_lz}\" file "
+           "${surface_pzz} ${surface_lx} ${surface_ly} ${surface_lz} "
+           "${surface_wall_lo} ${surface_wall_hi}\" file "
         << files.film_energy_basename
         << " screen no title \"# time_fs temp_K pe_kcal_per_mol pxx_atm pyy_atm "
-           "pzz_atm lx_A ly_A lz_A\"\n"
+           "pzz_atm lx_A ly_A lz_A wall_lo_force wall_hi_force\"\n"
         << "run             " << kFilmProductionSteps << "\n"
         << "unfix           energy_output\n"
         << "unfix           integrate\n"
@@ -1756,9 +1764,7 @@ void write_info(
         ++composition_distribution[count];
     const double compression_scale =
         std::cbrt(settings.density / settings.target_density);
-    const PairParameters cold_wall = dms_pair_parameters(300.0);
-    const double padding = settings.film_padding > 0.0
-        ? settings.film_padding : repulsive_cutoff(cold_wall);
+    const double padding = film_padding_angstrom(settings);
 
     out << std::fixed << std::setprecision(8)
         << "{\n"
@@ -1931,14 +1937,18 @@ void write_info(
         << "    \"source_temperature_K\": 300.0,\n"
         << "    \"minimum_padding_each_z_face_angstrom\": " << padding << ",\n"
         << "    \"padding_source\": \""
-        << (settings.film_padding > 0.0 ? "explicit" : "300 K repulsive-wall cutoff")
+        << (settings.film_padding > kMinimumFilmPaddingAngstrom
+            ? "explicit" : "20 A safety minimum")
         << "\",\n"
         << "    \"initial_lz_rule\": \"bulk equilibrated Lz + 2 * actual padding; actual padding may increase to keep unwrapped chains clear of walls\",\n"
         << "    \"initial_lx_ly_rule\": \"inherit equilibrated bulk snapshot\",\n"
         << "    \"boundary_after_conversion\": \"p p f\",\n"
+        << "    \"initial_wall_steps\": " << kFilmWallSteps << ",\n"
         << "    \"temporary_wall_steps\": " << kFilmWallSteps << ",\n"
-        << "    \"wall_free_relaxation_steps\": " << kFilmRelaxSteps << ",\n"
-        << "    \"wall_free_relaxation_time_ns\": "
+        << "    \"wall_free_relaxation_steps\": 0,\n"
+        << "    \"wall_free_relaxation_time_ns\": 0,\n"
+        << "    \"guarded_relaxation_steps\": " << kFilmRelaxSteps << ",\n"
+        << "    \"guarded_relaxation_time_ns\": "
         << kFilmRelaxSteps * kTimestepFs / 1.0e6 << ",\n"
         << "    \"film_production_steps\": "
         << kFilmProductionSteps << ",\n"
@@ -1946,7 +1956,9 @@ void write_info(
         << kFilmProductionSteps * kTimestepFs / 1.0e6 << ",\n"
         << "    \"total_run_steps\": "
         << kFilmWallSteps + kFilmRelaxSteps + kFilmProductionSteps << ",\n"
-        << "    \"walls_during_production\": false\n"
+        << "    \"walls_during_production\": true,\n"
+        << "    \"wall_force_output_columns\": [\"wall_lo_force\", \"wall_hi_force\"],\n"
+        << "    \"valid_free_surface_requires_zero_wall_force\": true\n"
         << "  }\n"
         << "}\n";
     if (!out) throw std::runtime_error("Failed while writing info file: " + files.info);
@@ -1997,10 +2009,12 @@ void report(
         << "  bulk: " << kEquilibrationSteps * kTimestepFs / 1.0e6
         << " ns through 300 K NPT; no bulk production\n"
         << "  film: " << kFilmWallSteps * kTimestepFs / 1.0e6
-        << " ns with walls, then " << kFilmRelaxSteps * kTimestepFs / 1.0e6
-        << " ns wall-free equilibration and "
+        << " ns initialization, then " << kFilmRelaxSteps * kTimestepFs / 1.0e6
+        << " ns equilibration and "
         << kFilmProductionSteps * kTimestepFs / 1.0e6
-        << " ns pressure production\n"
+        << " ns pressure production with distant edge safety walls\n"
+        << "  minimum film z padding: " << film_padding_angstrom(settings)
+        << " A per face; check wall forces are zero during measurement\n"
         << "  generated files directory: " << files.directory << '\n'
         << "  submit both stages: bash " << files.pair_submit << '\n';
 }

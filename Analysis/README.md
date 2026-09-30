@@ -53,8 +53,8 @@ atomic-weight table, explicit-hydrogen convention, and descriptor implementation
 
 ## Film surface tension
 
-`surface_tension.py` reads wall-free film pressure output and calculates the
-two-surface mechanical estimate from the normal and lateral pressures:
+`surface_tension.py` reads film pressure output and calculates the two-surface
+mechanical estimate from the normal and lateral pressures:
 
 ```text
 gamma = (Lz / 2) * [Pzz - (Pxx + Pyy) / 2]
@@ -70,4 +70,7 @@ make surface-tension CONFIG=simulations/03/model.conf PHASE=prod
 `BLOCK_NS=10` changes the block width. The tool prints mN/m and an overall
 sample mean. It does not decide when the film is equilibrated; inspect the
 block trend and film geometry before treating a value as final. The
-`film_eq` and `film` files each start their time counter at zero.
+`film_eq` and `film` files each start their time counter at zero. New files
+also include two edge-wall forces; the analyzer reports how many samples had
+nonzero wall contact. Such samples are not valid unconfined free-surface
+measurements.

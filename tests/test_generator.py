@@ -71,10 +71,13 @@ class GeneratorWorkflowTest(unittest.TestCase):
                 self.assertEqual(info["simulation_template"]["equilibration_steps"], 11000000)
                 self.assertEqual(info["simulation_template"]["bulk_300K_npt_steps"], 5000000)
                 self.assertNotIn("green_kubo_production_steps", info["simulation_template"])
-                self.assertEqual(info["film_from_bulk"]["wall_free_relaxation_steps"], 10000000)
+                self.assertEqual(info["film_from_bulk"]["guarded_relaxation_steps"], 10000000)
+                self.assertEqual(info["film_from_bulk"]["wall_free_relaxation_steps"], 0)
                 self.assertEqual(info["film_from_bulk"]["film_production_steps"], 10000000)
                 self.assertEqual(info["film_from_bulk"]["film_production_time_ns"], 50)
                 self.assertEqual(info["film_from_bulk"]["total_run_steps"], 20100000)
+                self.assertEqual(info["film_from_bulk"]["minimum_padding_each_z_face_angstrom"], 20)
+                self.assertTrue(info["film_from_bulk"]["walls_during_production"])
                 self.assertEqual(info["files"]["film_equilibration_output"],
                                  "energy." + case + ".film_eq.dat")
                 self.assertNotIn("green_kubo_stress_output", info["files"])
@@ -95,10 +98,16 @@ class GeneratorWorkflowTest(unittest.TestCase):
                 self.assertIn("variable        upper_pad equal c_zu_max-zhi+", film)
                 self.assertIn("v_lower_pad+v_upper_pad+abs(v_lower_pad-v_upper_pad)", film)
                 self.assertIn("variable        needed_pad equal 0.5*(", film)
+                self.assertIn("variable        needed_pad equal 0.5*(20.000000000", film)
                 self.assertNotIn("needed_pad equal max(", film)
                 self.assertIn("boundary p p f", film)
-                self.assertIn("unfix           zlo_wall", film)
-                self.assertIn("unfix           zhi_wall", film)
+                self.assertNotIn("unfix           zlo_wall", film)
+                self.assertNotIn("unfix           zhi_wall", film)
+                self.assertIn("fix             zlo_wall all wall/lj126 zlo EDGE", film)
+                self.assertIn("fix             zhi_wall all wall/lj126 zhi EDGE", film)
+                self.assertIn("fix_modify      zlo_wall virial no", film)
+                self.assertIn("fix_modify      zhi_wall virial no", film)
+                self.assertIn("wall_lo_force wall_hi_force", film)
                 self.assertIn("dump            filmtraj all custom 100000 ", film)
                 self.assertEqual(film.count("undump          filmtraj"), 1)
                 self.assertLess(film.index("undump          filmtraj"),
@@ -116,7 +125,7 @@ class GeneratorWorkflowTest(unittest.TestCase):
                         elif fields[0] == "reset_timestep":
                             self.assertFalse(active_dumps, line)
                 self.assertLess(
-                    film.index("unfix           zhi_wall"),
+                    film.index("fix             zhi_wall"),
                     film.index("file energy." + case + ".film_eq.dat"),
                 )
                 self.assertLess(
@@ -139,6 +148,28 @@ class GeneratorWorkflowTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--film-padding must be positive", result.stderr)
+
+    def test_padding_below_minimum_is_raised(self):
+        for requested, expected in ((8, 20), (25, 25)):
+            with self.subTest(requested=requested):
+                case = f"padding_{requested}"
+                result = subprocess.run(
+                    [str(self.generator), "--length", "4", "--chains", "2",
+                     "--mps-percent", "0", "--film-padding", str(requested),
+                     "--output", str(self.work / ("data." + case))],
+                    cwd=ROOT, text=True, capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                info = json.loads((self.work / (case + ".info")).read_text())
+                self.assertEqual(
+                    info["film_from_bulk"]["minimum_padding_each_z_face_angstrom"],
+                    expected,
+                )
+                film = (self.work / ("in." + case + ".film")).read_text()
+                self.assertIn(
+                    f"variable        needed_pad equal 0.5*({expected}.000000000",
+                    film,
+                )
 
     def test_config_output_is_adjacent_to_model_conf(self):
         folder = self.work / "adjacent"

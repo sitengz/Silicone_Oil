@@ -9,6 +9,7 @@ from pathlib import Path
 
 ATM_ANGSTROM_TO_MN_PER_M = 0.0101325
 REQUIRED_COLUMNS = ("time_fs", "pxx_atm", "pyy_atm", "pzz_atm", "lz_A")
+WALL_COLUMNS = ("wall_lo_force", "wall_hi_force")
 
 
 def file_from_config(config: Path, phase: str) -> Path:
@@ -36,6 +37,8 @@ def read_pressure(path: Path) -> list[dict[str, float]]:
         columns = header_line[2:].split()
         if any(column not in columns for column in REQUIRED_COLUMNS):
             raise ValueError(f"{path} lacks required pressure, time, or Lz columns")
+        if sum(column in columns for column in WALL_COLUMNS) not in (0, 2):
+            raise ValueError(f"{path} must contain both wall-force columns or neither")
         records = []
         for line_number, raw in enumerate(handle, 2):
             if not raw.strip() or raw.lstrip().startswith("#"):
@@ -96,6 +99,14 @@ def main() -> None:
     samples = rows[:-1]
     overall = sum(gamma_mn_per_m(row) for row in samples) / len(samples)
     print(f"overall_sample_mean_mN_per_m: {overall:.6f}")
+    if all(column in samples[0] for column in WALL_COLUMNS):
+        contacts = sum(
+            any(abs(row[column]) > 1.0e-9 for column in WALL_COLUMNS)
+            for row in samples
+        )
+        print(f"wall_contact_samples: {contacts} / {len(samples)}")
+        if contacts:
+            print("WARNING: Wall contact occurred; the pressure result is not an unconfined free-surface estimate.")
     print("Block values must be inspected for drift; this tool does not certify equilibration.")
 
 

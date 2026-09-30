@@ -38,7 +38,7 @@ sequence, and topology rather than building a second random packing.
 The `.info` file is valid JSON and records the composition, realized MPS
 monomer and weight percentages, type populations, topology counts, box size,
 random seeds, mixing-rule choice, and both simulation stages. During the runs,
-LAMMPS writes separate wall-free film equilibration and production pressure
+LAMMPS writes separate film equilibration and production pressure/wall-force
 time series.
 
 ## Build and generate
@@ -388,7 +388,7 @@ Examples:
 | `--sequence MODE` | text | `random` | `random`, `alternating`, or `block` |
 | `--density X` | positive number | 0.1 | Initial mass density in g/cm³ |
 | `--target-density X` | positive number | 0.8 | Density after scripted 800 K compression |
-| `--film-padding X` | positive number | 300 K repulsive cutoff | Minimum vacuum padding added to each z face, in Å |
+| `--film-padding X` | positive number | 20 Å | Requested vacuum padding per z face; values below 20 Å are raised to 20 Å |
 | `--min-separation X` | positive number below 15 | 4.5 | Minimum intermolecular bead distance in Å |
 | `--seed N` | positive integer | 20260727 | Sequence, conformation, rotation, and packing seed |
 | `--velocity-seed N` | positive integer | 492845 | LAMMPS initial-velocity seed |
@@ -406,19 +406,18 @@ bulk:  1M steps at 800 K → 1M isotropic compression → 1M relaxation
        → 2M more at 800 K → 1M cooling under isotropic NPT
        → 5M at 300 K under isotropic NPT → write data.<case>.npt_eq
 film:  read data.<case>.npt_eq → expose two z surfaces
-       → 100k steps at 300 K with temporary walls and lateral NPT
-       → remove walls → 10M-step, 50 ns wall-free NVT equilibration
-       → 10M-step, 50 ns wall-free NVT pressure production
+       → 100k steps at 300 K with edge safety walls and lateral NPT
+       → 10M-step, 50 ns NVT equilibration with distant safety walls
+       → 10M-step, 50 ns NVT pressure production with distant safety walls
 ```
 
 The film starts at **300 K** from the equilibrated bulk snapshot; it does not
 repeat hot compression. The input keeps the bulk snapshot's `Lx` and `Ly` at
-conversion, while lateral NPT during temporary-wall relaxation may change
+conversion, while lateral NPT during initial film relaxation may change
 their final values. It converts z to nonperiodic (`p p f`) and initially adds
-one 300 K repulsive-wall cutoff of space to each z face. The default DMS wall
-cutoff is about 7.235 Å. If unwrapped chains would otherwise contact the
-walls, the script automatically increases the padding and prints the actual
-value in the LAMMPS log. Thus:
+at least **20 Å** of space to each z face. If unwrapped chains would otherwise
+contact the walls, the script automatically increases the padding and prints
+the actual value in the LAMMPS log. Thus:
 
 ```text
 film cell Lz = equilibrated bulk Lz + 2 × actual padding
@@ -427,12 +426,13 @@ film cell Lz = equilibrated bulk Lz + 2 × actual padding
 This is the cell height, not the oil slab thickness. The film conversion
 follows LAMMPS's [bulk-to-slab image-flag procedure](https://docs.lammps.org/Howto_bulk2slab.html)
 to preserve bonded chains that cross the original periodic z seam. The
-repulsive `wall/lj126` fixes are removed **before** the film's free-surface
-relaxation and energy measurement. The generator writes only a short
-temporary-wall film trajectory; long bulk and wall-free film trajectories are
-disabled to limit output size. Inspect the saved `film_eq` and `film_final`
-data snapshots for atoms near the fixed z boundaries; increase `film_padding`
-if needed.
+repulsive `wall/lj126` fixes remain at the distant box edges throughout the
+film run to guard against atom loss. Their force should be zero during
+surface-tension sampling; nonzero wall force means the sampled film is
+wall-confined rather than freely surfaced. The generator writes only a short
+initial film trajectory; long bulk and film trajectories are disabled to limit
+output size. Inspect the saved `film_eq` and `film_final` data snapshots for
+atoms near the fixed z boundaries; increase `film_padding` if needed.
 
 The high-temperature repulsive pair matrix is active only in bulk's first
 five million steps. At 300 K the attractive `lj/gromacs` matrix is used with
@@ -443,18 +443,21 @@ equilibration times.
 
 ### Film pressure and surface tension
 
-After temporary walls are removed, LAMMPS records pressure and box size every
-1000 steps in `energy.<case>.film_eq.dat` during wall-free equilibration and
+With the distant safety walls still active, LAMMPS records pressure and box
+size every 1000 steps in `energy.<case>.film_eq.dat` during equilibration and
 `energy.<case>.film.dat` during production. The columns are time, temperature,
-potential energy, `Pxx`, `Pyy`, `Pzz`, `Lx`, `Ly`, and `Lz`. Each phase resets
-the time counter to zero. The two-surface mechanical estimate is
+potential energy, `Pxx`, `Pyy`, `Pzz`, `Lx`, `Ly`, `Lz`, and the two wall forces.
+The wall forces are in kcal mol⁻¹ Å⁻¹ and should both be zero for valid
+free-surface samples. Each phase resets the time counter to zero. The
+two-surface mechanical estimate is
 
 ```text
 gamma = (Lz / 2) * [Pzz - (Pxx + Pyy) / 2]
 ```
 
 For `real` units, multiply `Lz` in Å times pressure in atm by `0.0101325`
-to obtain mN/m. Both pressure files contain only wall-free data. Analyze
+to obtain mN/m. Both pressure files include wall-force diagnostics; only
+samples with zero wall force represent an unconfined free surface. Analyze
 nonoverlapping time blocks rather than treating a drifting mean as converged:
 
 ```bash
@@ -463,7 +466,7 @@ make surface-tension CONFIG=simulations/03/model.conf PHASE=prod BLOCK_NS=5
 ```
 
 The tool reports block and full-file means but does not automatically certify
-equilibration. If later blocks still drift, continue wall-free film NVT from
+equilibration. If later blocks still drift, continue film NVT from
 the saved film state before reporting a final surface tension. Check that two
 free surfaces remain intact and atoms do not reach the nonperiodic z edges.
 
@@ -500,13 +503,13 @@ It does not:
   oil atoms, and bonded topology.
 - `in.<case>` is the bulk equilibration input through the 300 K NPT snapshot.
 - `in.<case>.film` reads the bulk equilibrated data at runtime and performs
-  film conversion, temporary-wall initiation, wall-free equilibration, and
-  pressure production.
+  film conversion, edge-wall initiation, guarded equilibration, and pressure
+  production.
 - `submit.<case>.sh` and `submit.<case>.film.sh` are separate one-node, 96-task
   Slurm jobs; `submit.<case>.pair.sh` queues them in order.
 - `<case>.info` is a JSON manifest containing composition, sequence,
   force-field, topology, random-seed, and production settings.
-- `energy.<case>.film_eq.dat` and `energy.<case>.film.dat` are the wall-free
-  equilibration and production pressure/energy/box-size time series.
-- `dump.<case>.film.lammpstrj` covers only temporary-wall film initiation;
-  no continuous trajectory is written during bulk or wall-free film stages.
+- `energy.<case>.film_eq.dat` and `energy.<case>.film.dat` are the
+  equilibration and production pressure/energy/box-size/wall-force time series.
+- `dump.<case>.film.lammpstrj` covers only initial film equilibration;
+  no continuous trajectory is written during bulk or later film stages.
