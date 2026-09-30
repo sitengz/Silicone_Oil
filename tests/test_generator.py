@@ -108,6 +108,12 @@ class GeneratorWorkflowTest(unittest.TestCase):
                 self.assertIn("fix_modify      zlo_wall virial no", film)
                 self.assertIn("fix_modify      zhi_wall virial no", film)
                 self.assertIn("wall_lo_force wall_hi_force", film)
+                self.assertIn("fix             equil_output all print 1000 &", film)
+                self.assertIn("fix             energy_output all print 1000 &", film)
+                self.assertTrue(
+                    all(len(line) <= 254 for line in film.splitlines()),
+                    "LAMMPS input lines must stay below its physical-line limit",
+                )
                 self.assertIn("dump            filmtraj all custom 100000 ", film)
                 self.assertEqual(film.count("undump          filmtraj"), 1)
                 self.assertLess(film.index("undump          filmtraj"),
