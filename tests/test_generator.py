@@ -3,6 +3,7 @@
 import json
 import math
 import pathlib
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -108,8 +109,14 @@ class GeneratorWorkflowTest(unittest.TestCase):
                 self.assertIn("fix_modify      zlo_wall virial no", film)
                 self.assertIn("fix_modify      zhi_wall virial no", film)
                 self.assertIn("wall_lo_force wall_hi_force", film)
-                self.assertIn("fix             equil_output all print 1000 &", film)
-                self.assertIn("fix             energy_output all print 1000 &", film)
+                for output_id in ("equil_output", "energy_output"):
+                    output_line = next(
+                        line for line in film.splitlines()
+                        if line.split()[:2] == ["fix", output_id]
+                    )
+                    self.assertEqual(output_line.count('"'), 4)
+                    self.assertNotIn("&", output_line)
+                    self.assertIn("wall_lo_force wall_hi_force", output_line)
                 self.assertTrue(
                     all(len(line) <= 254 for line in film.splitlines()),
                     "LAMMPS input lines must stay below its physical-line limit",
@@ -144,6 +151,44 @@ class GeneratorWorkflowTest(unittest.TestCase):
                         ["bash", "-n", str(folder / ("submit." + case + suffix))],
                         check=True,
                     )
+
+    def test_n4_film_print_commands_are_complete(self):
+        case = "N4_PDI1"
+        result = subprocess.run(
+            [str(self.generator), "--length", "4", "--chains", "2",
+             "--mps-percent", "0", "--output", str(self.work / ("data." + case))],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = (self.work / ("in." + case + ".film")).read_text().splitlines()
+        variables = {}
+        for line in lines:
+            fields = line.split()
+            if fields[:1] == ["variable"] and fields[2] == "equal":
+                variables[fields[1]] = fields[3]
+        outputs = [line for line in lines
+                   if line.split()[:2] in (["fix", "equil_output"],
+                                          ["fix", "energy_output"])]
+        self.assertEqual(len(outputs), 2)
+        for line in outputs:
+            self.assertLessEqual(len(line), 254)
+            fields = shlex.split(line)
+            self.assertEqual(len(fields), 12)
+            self.assertEqual(fields[6::2], ["file", "screen", "title"])
+            self.assertEqual(fields[9], "no")
+            references = fields[5].split()
+            names = [ref[2:-1] if ref.startswith("${") else ref[1:]
+                     for ref in references]
+            self.assertEqual(
+                [variables[name] for name in names],
+                ["time", "temp", "pe", "pxx", "pyy", "pzz", "lx", "ly", "lz",
+                 "f_zlo_wall[1]", "f_zhi_wall[1]"],
+            )
+            self.assertEqual(
+                fields[11].split(),
+                ["#", "time_fs", "temp_K", "pe_kcal_per_mol", "pxx_atm", "pyy_atm",
+                 "pzz_atm", "lx_A", "ly_A", "lz_A", "wall_lo_force", "wall_hi_force"],
+            )
 
     def test_rejects_nonpositive_padding(self):
         result = subprocess.run(
