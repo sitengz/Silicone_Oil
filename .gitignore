@@ -27,3 +27,4 @@
 # The TIFF figures are kept; SVGs are intermediate render sources.
 /simulations/SZ_N*.svg
 __pycache__/
+/Analysis/results/

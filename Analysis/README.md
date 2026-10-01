@@ -53,6 +53,13 @@ atomic-weight table, explicit-hydrogen convention, and descriptor implementation
 
 ## Film surface tension
 
+For the standard MATLAB procedure (shifted-window plots, production block
+mean ± SEM, log/wall checks, and multi-case summaries), see
+[surface_tension_workflow.md](surface_tension_workflow.md). Use
+`analyze_film_surface_tension.m` for one case or
+`analyze_film_surface_tension_batch.m` for a series. Generated results are
+saved separately from simulation inputs.
+
 `surface_tension.py` reads film pressure output and calculates the two-surface
 mechanical estimate from the normal and lateral pressures:
 
