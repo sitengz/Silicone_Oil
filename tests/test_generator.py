@@ -1,0 +1,395 @@
+"""Smoke checks for the bulk-to-film generator package (no LAMMPS needed)."""
+
+import json
+import math
+import pathlib
+import shlex
+import subprocess
+import tempfile
+import unittest
+from collections import Counter
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+EXAMPLES = (
+    ("pdms_n32", 1280, 0),
+    ("pmps_n32", 2560, 32),
+    ("random_50_50_n32", 1920, 16),
+)
+FORMULATIONS = (
+    ("01", 30, 0, 3333),
+    ("02", 12, 100, 8333),
+    ("03", 179, 5, 559),
+    ("04", 42, 10, 2381),
+    ("05", 44, 10, 2273),
+    ("06", 65, 10, 1538),
+    ("07", 15, 50, 6667),
+)
+
+
+class GeneratorWorkflowTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory(prefix="silicone-oil-test-")
+        cls.work = pathlib.Path(cls.temp.name)
+        cls.generator = cls.work / "oil_generator"
+        subprocess.run(
+            [
+                "g++", "-std=c++17", "-O2", "-Wall", "-Wextra", "-Wpedantic",
+                str(ROOT / "Generator/oil_generator.cpp"), "-o", str(cls.generator),
+            ],
+            check=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    def test_three_example_configs(self):
+        for example, expected_atoms, mps_per_chain in EXAMPLES:
+            with self.subTest(example=example):
+                case = example.replace("_n32", "")
+                result = subprocess.run(
+                    [
+                        str(self.generator), "--config",
+                        str(ROOT / "examples" / example / "model.conf"),
+                        "--chains", "40", "--output",
+                        str(self.work / case / ("data." + case)),
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                folder = self.work / case
+                info = json.loads((folder / (case + ".info")).read_text())
+                self.assertEqual(info["topology_counts"]["atoms"], expected_atoms)
+                self.assertEqual(
+                    info["composition"]["mps_repeats_per_chain"], mps_per_chain
+                )
+                self.assertEqual(info["composition"]["chain_length"], 32)
+                self.assertEqual(info["composition"]["chain_count"], 40)
+                self.assertEqual(info["simulation_template"]["equilibration_steps"], 11000000)
+                self.assertEqual(info["simulation_template"]["bulk_300K_npt_steps"], 5000000)
+                self.assertNotIn("green_kubo_production_steps", info["simulation_template"])
+                self.assertEqual(info["film_from_bulk"]["guarded_relaxation_steps"], 10000000)
+                self.assertEqual(info["film_from_bulk"]["wall_free_relaxation_steps"], 0)
+                self.assertEqual(info["film_from_bulk"]["film_production_steps"], 10000000)
+                self.assertEqual(info["film_from_bulk"]["film_production_time_ns"], 50)
+                self.assertEqual(info["film_from_bulk"]["total_run_steps"], 20100000)
+                self.assertEqual(info["film_from_bulk"]["minimum_padding_each_z_face_angstrom"], 20)
+                self.assertTrue(info["film_from_bulk"]["walls_during_production"])
+                self.assertEqual(info["files"]["film_equilibration_output"],
+                                 "energy." + case + ".film_eq.dat")
+                self.assertNotIn("green_kubo_stress_output", info["files"])
+                self.assertTrue((folder / ("data." + case)).is_file())
+                bulk = (folder / ("in." + case)).read_text()
+                film = (folder / ("in." + case + ".film")).read_text()
+                self.assertIn("boundary        p p p", bulk)
+                self.assertIn("write_data      data." + case + ".npt_eq", bulk)
+                self.assertIn("run             5000000", bulk)
+                self.assertNotIn("gk_output", bulk)
+                self.assertNotIn("run             20000000", bulk)
+                self.assertNotIn("dump            traj", bulk)
+                self.assertIn("read_data       data." + case + ".npt_eq", film)
+                self.assertEqual(film.count("run             10000000"), 2)
+                self.assertNotIn("run             20000000", film)
+                self.assertIn("reset_atoms     image all", film)
+                self.assertIn("variable        lower_pad equal zlo-c_zu_min+", film)
+                self.assertIn("variable        upper_pad equal c_zu_max-zhi+", film)
+                self.assertIn("v_lower_pad+v_upper_pad+abs(v_lower_pad-v_upper_pad)", film)
+                self.assertIn("variable        needed_pad equal 0.5*(", film)
+                self.assertIn("variable        needed_pad equal 0.5*(20.000000000", film)
+                self.assertNotIn("needed_pad equal max(", film)
+                self.assertIn("boundary p p f", film)
+                self.assertNotIn("unfix           zlo_wall", film)
+                self.assertNotIn("unfix           zhi_wall", film)
+                self.assertIn("fix             zlo_wall all wall/lj126 zlo EDGE", film)
+                self.assertIn("fix             zhi_wall all wall/lj126 zhi EDGE", film)
+                self.assertIn("fix_modify      zlo_wall virial no", film)
+                self.assertIn("fix_modify      zhi_wall virial no", film)
+                self.assertIn("wall_lo_force wall_hi_force", film)
+                for output_id in ("equil_output", "energy_output"):
+                    output_line = next(
+                        line for line in film.splitlines()
+                        if line.split()[:2] == ["fix", output_id]
+                    )
+                    self.assertEqual(output_line.count('"'), 4)
+                    self.assertNotIn("&", output_line)
+                    self.assertIn("wall_lo_force wall_hi_force", output_line)
+                self.assertTrue(
+                    all(len(line) <= 254 for line in film.splitlines()),
+                    "LAMMPS input lines must stay below its physical-line limit",
+                )
+                self.assertIn("dump            filmtraj all custom 100000 ", film)
+                self.assertEqual(film.count("undump          filmtraj"), 1)
+                self.assertLess(film.index("undump          filmtraj"),
+                                film.index("reset_timestep  0 time 0.0"))
+                for script in (bulk, film):
+                    active_dumps = set()
+                    for line in script.splitlines():
+                        fields = line.split()
+                        if not fields:
+                            continue
+                        if fields[0] == "dump":
+                            active_dumps.add(fields[1])
+                        elif fields[0] == "undump":
+                            active_dumps.remove(fields[1])
+                        elif fields[0] == "reset_timestep":
+                            self.assertFalse(active_dumps, line)
+                self.assertLess(
+                    film.index("fix             zhi_wall"),
+                    film.index("file energy." + case + ".film_eq.dat"),
+                )
+                self.assertLess(
+                    film.index("file energy." + case + ".film_eq.dat"),
+                    film.index("file energy." + case + ".film.dat"),
+                )
+                self.assertNotIn("fix             xlink", bulk + film)
+                for suffix in (".sh", ".film.sh", ".pair.sh"):
+                    subprocess.run(
+                        ["bash", "-n", str(folder / ("submit." + case + suffix))],
+                        check=True,
+                    )
+
+    def test_n4_film_print_commands_are_complete(self):
+        case = "N4_PDI1"
+        result = subprocess.run(
+            [str(self.generator), "--length", "4", "--chains", "2",
+             "--mps-percent", "0", "--output", str(self.work / ("data." + case))],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = (self.work / ("in." + case + ".film")).read_text().splitlines()
+        variables = {}
+        for line in lines:
+            fields = line.split()
+            if fields[:1] == ["variable"] and fields[2] == "equal":
+                variables[fields[1]] = fields[3]
+        outputs = [line for line in lines
+                   if line.split()[:2] in (["fix", "equil_output"],
+                                          ["fix", "energy_output"])]
+        self.assertEqual(len(outputs), 2)
+        for line in outputs:
+            self.assertLessEqual(len(line), 254)
+            fields = shlex.split(line)
+            self.assertEqual(len(fields), 12)
+            self.assertEqual(fields[6::2], ["file", "screen", "title"])
+            self.assertEqual(fields[9], "no")
+            references = fields[5].split()
+            names = [ref[2:-1] if ref.startswith("${") else ref[1:]
+                     for ref in references]
+            self.assertEqual(
+                [variables[name] for name in names],
+                ["time", "temp", "pe", "pxx", "pyy", "pzz", "lx", "ly", "lz",
+                 "f_zlo_wall[1]", "f_zhi_wall[1]"],
+            )
+            self.assertEqual(
+                fields[11].split(),
+                ["#", "time_fs", "temp_K", "pe_kcal_per_mol", "pxx_atm", "pyy_atm",
+                 "pzz_atm", "lx_A", "ly_A", "lz_A", "wall_lo_force", "wall_hi_force"],
+            )
+
+    def test_rejects_nonpositive_padding(self):
+        result = subprocess.run(
+            [str(self.generator), "--film-padding", "0"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--film-padding must be positive", result.stderr)
+
+    def test_padding_below_minimum_is_raised(self):
+        for requested, expected in ((8, 20), (25, 25)):
+            with self.subTest(requested=requested):
+                case = f"padding_{requested}"
+                result = subprocess.run(
+                    [str(self.generator), "--length", "4", "--chains", "2",
+                     "--mps-percent", "0", "--film-padding", str(requested),
+                     "--output", str(self.work / ("data." + case))],
+                    cwd=ROOT, text=True, capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                info = json.loads((self.work / (case + ".info")).read_text())
+                self.assertEqual(
+                    info["film_from_bulk"]["minimum_padding_each_z_face_angstrom"],
+                    expected,
+                )
+                film = (self.work / ("in." + case + ".film")).read_text()
+                self.assertIn(
+                    f"variable        needed_pad equal 0.5*({expected}.000000000",
+                    film,
+                )
+
+    def test_config_output_is_adjacent_to_model_conf(self):
+        folder = self.work / "adjacent"
+        folder.mkdir()
+        config = folder / "model.conf"
+        config.write_text("length = 3\nchains = 2\nmps_percent = 0\noutput = data.adjacent\n")
+        result = subprocess.run(
+            [str(self.generator), "--config", str(config)],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((folder / "data.adjacent").is_file())
+        self.assertTrue((folder / "in.adjacent").is_file())
+        self.assertTrue((folder / "submit.adjacent.pair.sh").is_file())
+        self.assertFalse((folder / "adjacent").exists())
+
+    def test_explicit_chain_length_counts(self):
+        folder = self.work / "length_counts"
+        folder.mkdir()
+        config = folder / "model.conf"
+        config.write_text(
+            "chain_count = 6 1\nchain_count = 4 2\n"
+            "mps_percent = 0\noutput = data.length_counts\n"
+        )
+        result = subprocess.run(
+            [str(self.generator), "--config", str(config)],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        info = json.loads((folder / "length_counts.info").read_text())
+        composition = info["composition"]
+        self.assertIsNone(composition["chain_length"])
+        self.assertEqual(composition["chain_count"], 3)
+        self.assertEqual(composition["total_repeats"], 14)
+        self.assertEqual(composition["chain_length_distribution"], [
+            {"length": 4, "chains": 2}, {"length": 6, "chains": 1}
+        ])
+        self.assertEqual(info["topology_counts"]["atoms"], 14)
+        self.assertEqual(info["topology_counts"]["bonds"]["total"], 11)
+        data = (folder / "data.length_counts").read_text()
+        atoms = data.split("Atoms # full\n\n", 1)[1].split("\nBonds\n", 1)[0]
+        lengths = Counter()
+        for line in atoms.splitlines():
+            if line.strip():
+                fields = line.split()
+                lengths[int(fields[1])] += 1
+        self.assertEqual(sorted(lengths.values()), [4, 4, 6])
+
+    def test_chain_count_rejects_duplicate_and_fixed_length_mix(self):
+        for config_text, expected in (
+            ("chain_count = 4 2\nchain_count = 4 3\n", "duplicate length"),
+            ("chain_count = 4 2\nlength = 4\n", "cannot be mixed"),
+            ("chain_count = 4 0\n", "must be positive"),
+        ):
+            with self.subTest(config_text=config_text):
+                folder = self.work / "invalid_counts"
+                folder.mkdir(exist_ok=True)
+                config = folder / "model.conf"
+                config.write_text(config_text)
+                result = subprocess.run(
+                    [str(self.generator), "--config", str(config)],
+                    cwd=ROOT, text=True, capture_output=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+
+    def test_explicit_lengths_preserve_global_mps_fraction(self):
+        folder = self.work / "mixed_lengths"
+        folder.mkdir()
+        config = folder / "model.conf"
+        config.write_text(
+            "chain_count = 4 2\nchain_count = 6 1\n"
+            "mps_percent = 50\noutput = data.mixed_lengths\n"
+        )
+        result = subprocess.run(
+            [str(self.generator), "--config", str(config)],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        info = json.loads((folder / "mixed_lengths.info").read_text())
+        composition = info["composition"]
+        self.assertEqual(composition["total_repeats"], 14)
+        self.assertEqual(composition["mps_repeats_total"], 7)
+        self.assertEqual(info["topology_counts"]["atoms"], 21)
+        self.assertEqual(
+            sum(row["mps_repeats"] * row["chains"]
+                for row in composition["chain_composition_distribution"]),
+            7,
+        )
+
+    def test_numbered_formulations_distribute_mps_across_chains(self):
+        for case, length, percent, configured_chains in FORMULATIONS:
+            with self.subTest(case=case):
+                config = ROOT / "simulations" / case / "model.conf"
+                settings = dict(
+                    line.split("=", 1) for line in config.read_text().splitlines()
+                    if "=" in line and not line.lstrip().startswith("#")
+                )
+                settings = {key.strip(): value.strip() for key, value in settings.items()}
+                self.assertEqual(int(settings["length"]), length)
+                self.assertEqual(int(settings["chains"]), configured_chains)
+                self.assertEqual(float(settings["mps_percent"]), percent)
+                self.assertEqual(settings["sequence"], "random")
+                self.assertEqual(settings["output"], f"data.{case}")
+
+                trial_chains = 40
+                result = subprocess.run(
+                    [
+                        str(self.generator), "--config", str(config),
+                        "--chains", str(trial_chains), "--output",
+                        str(self.work / ("form_" + case) / ("data.form_" + case)),
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                folder = self.work / ("form_" + case)
+                info = json.loads((folder / ("form_" + case + ".info")).read_text())
+                composition = info["composition"]
+                target_mps = math.floor(length * trial_chains * percent / 100 + 0.5)
+                self.assertEqual(composition["total_repeats"], length * trial_chains)
+                self.assertEqual(composition["mps_repeats_total"], target_mps)
+                self.assertEqual(
+                    info["topology_counts"]["atoms"],
+                    length * trial_chains + target_mps,
+                )
+                distribution = composition["chain_composition_distribution"]
+                self.assertEqual(sum(part["chains"] for part in distribution), trial_chains)
+                self.assertEqual(
+                    sum(part["chains"] * part["mps_repeats"] for part in distribution),
+                    target_mps,
+                )
+                self.assertLessEqual(len(distribution), 2)
+                data = (folder / ("data.form_" + case)).read_text()
+                atoms = data.split("Atoms # full\n\n", 1)[1].split("\nBonds\n", 1)[0]
+                actual_mps = Counter()
+                for line in atoms.splitlines():
+                    if line.strip():
+                        fields = line.split()
+                        if fields[2] == "5":
+                            actual_mps[int(fields[1])] += 1
+                actual_counts = Counter(actual_mps.get(i, 0) for i in range(1, trial_chains + 1))
+                self.assertEqual(
+                    actual_counts,
+                    Counter({part["mps_repeats"]: part["chains"] for part in distribution}),
+                )
+
+    def test_weight_percent_uses_system_wide_rounding(self):
+        result = subprocess.run(
+            [
+                str(self.generator), "--length", "15", "--chains", "40",
+                "--mps-wt", "50", "--output", str(self.work / "data.weight_test"),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        info = json.loads((self.work / "weight_test.info").read_text())
+        composition = info["composition"]
+        expected = math.floor(600 * 74.0 / (136.2264 + 74.0) + 0.5)
+        self.assertEqual(composition["mps_repeats_total"], expected)
+        self.assertIsNone(composition["mps_repeats_per_chain"])
+        self.assertEqual(
+            sum(part["chains"] for part in composition["chain_composition_distribution"]),
+            40,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

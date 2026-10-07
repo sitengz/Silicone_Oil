@@ -4,5 +4,27 @@
 /in.*
 /submit.*.sh
 /*.info
+/energy.*.dat
 /gk_stress.*.dat
 /log.*
+/restart.*
+/dump.*
+/unwrap.*
+/out.*
+/slurm-*.out
+/slurm-*.err
+/examples/*/*
+!/examples/*/model.conf
+/simulations/*/
+# Keep numbered formulation configs, but ignore generated simulation files.
+!/simulations/[0-9][0-9]/
+/simulations/[0-9][0-9]/*
+!/simulations/[0-9][0-9]/model.conf
+# Keep explicit PDMS series configs, not generated bulk/film outputs.
+!/simulations/N*_PDI*/
+/simulations/N*_PDI*/*
+!/simulations/N*_PDI*/model.conf
+# The TIFF figures are kept; SVGs are intermediate render sources.
+/simulations/SZ_N*.svg
+__pycache__/
+/Analysis/results/
